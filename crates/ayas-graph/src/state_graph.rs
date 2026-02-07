@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use ayas_core::error::{GraphError, Result};
 use serde_json::Value;
 
-use crate::channel::{Channel, LastValue};
+use crate::channel::ChannelSpec;
 use crate::compiled::CompiledStateGraph;
 use crate::constants::{END, START};
 use crate::edge::{ConditionalEdge, Edge};
@@ -15,7 +15,7 @@ use crate::node::NodeFn;
 /// the graph topology, then call `compile()` to validate and produce
 /// a `CompiledStateGraph`.
 pub struct StateGraph {
-    channels: HashMap<String, Box<dyn Channel>>,
+    channel_specs: HashMap<String, ChannelSpec>,
     nodes: HashMap<String, NodeFn>,
     edges: Vec<Edge>,
     conditional_edges: Vec<ConditionalEdge>,
@@ -27,7 +27,7 @@ impl StateGraph {
     /// Create a new, empty state graph.
     pub fn new() -> Self {
         Self {
-            channels: HashMap::new(),
+            channel_specs: HashMap::new(),
             nodes: HashMap::new(),
             edges: Vec::new(),
             conditional_edges: Vec::new(),
@@ -36,16 +36,13 @@ impl StateGraph {
         }
     }
 
-    /// Add a channel to manage a state key.
-    ///
-    /// If no channel is explicitly added for a key, `LastValue` with
-    /// `Value::Null` default is used during compilation.
+    /// Add a channel spec for a state key.
     pub fn add_channel(
         &mut self,
         name: impl Into<String>,
-        channel: Box<dyn Channel>,
+        spec: ChannelSpec,
     ) -> &mut Self {
-        self.channels.insert(name.into(), channel);
+        self.channel_specs.insert(name.into(), spec);
         self
     }
 
@@ -55,7 +52,12 @@ impl StateGraph {
         name: impl Into<String>,
         default: Value,
     ) -> &mut Self {
-        self.add_channel(name, Box::new(LastValue::new(default)))
+        self.add_channel(name, ChannelSpec::LastValue { default })
+    }
+
+    /// Convenience: add an `AppendChannel`.
+    pub fn add_append_channel(&mut self, name: impl Into<String>) -> &mut Self {
+        self.add_channel(name, ChannelSpec::Append)
     }
 
     /// Add a node to the graph.
@@ -145,7 +147,7 @@ impl StateGraph {
             nodes: self.nodes,
             adjacency,
             conditional_edges: self.conditional_edges,
-            channels: self.channels,
+            channel_specs: self.channel_specs,
             entry_point,
             finish_points: self.finish_points,
         })

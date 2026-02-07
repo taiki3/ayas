@@ -4,6 +4,7 @@ members = [
     "crates/ayas-core",
     "crates/ayas-chain",
     "crates/ayas-graph",
+    "crates/ayas-agent",
     "crates/ayas-examples",
 ]
 
@@ -30,3 +31,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 ayas-core = { path = "crates/ayas-core" }
 ayas-chain = { path = "crates/ayas-chain" }
 ayas-graph = { path = "crates/ayas-graph" }
+ayas-agent = { path = "crates/ayas-agent" }

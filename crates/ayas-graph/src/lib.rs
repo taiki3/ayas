@@ -7,7 +7,7 @@ pub mod state_graph;
 
 /// Prelude module for convenient imports.
 pub mod prelude {
-    pub use crate::channel::{AppendChannel, Channel, LastValue};
+    pub use crate::channel::{AppendChannel, Channel, ChannelSpec, LastValue};
     pub use crate::compiled::CompiledStateGraph;
     pub use crate::constants::{END, START};
     pub use crate::edge::{ConditionalEdge, Edge};

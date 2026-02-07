@@ -1,6 +1,26 @@
 use ayas_core::error::{GraphError, Result};
 use serde_json::Value;
 
+/// Specification for creating a channel. Used by `CompiledStateGraph` to
+/// create fresh channel instances for each invocation.
+#[derive(Clone, Debug)]
+pub enum ChannelSpec {
+    /// A `LastValue` channel with the given default.
+    LastValue { default: Value },
+    /// An `AppendChannel`.
+    Append,
+}
+
+impl ChannelSpec {
+    /// Create a fresh `Channel` instance from this spec.
+    pub fn create(&self) -> Box<dyn Channel> {
+        match self {
+            ChannelSpec::LastValue { default } => Box::new(LastValue::new(default.clone())),
+            ChannelSpec::Append => Box::new(AppendChannel::new()),
+        }
+    }
+}
+
 /// A channel manages a single key in the graph state.
 ///
 /// Channels control how values are accumulated or overwritten during
@@ -115,7 +135,14 @@ impl Channel for AppendChannel {
         if values.is_empty() {
             return Ok(false);
         }
-        self.items.extend(values);
+        for value in values {
+            // Flatten array values: [a, b] adds a and b individually
+            if let Value::Array(arr) = value {
+                self.items.extend(arr);
+            } else {
+                self.items.push(value);
+            }
+        }
         self.rebuild_cache();
         Ok(true)
     }

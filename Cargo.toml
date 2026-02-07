@@ -7,6 +7,7 @@ members = [
     "crates/ayas-agent",
     "crates/ayas-deep-research",
     "crates/ayas-adl",
+    "crates/ayas-smith",
     "crates/ayas-examples",
 ]
 
@@ -32,6 +33,12 @@ tokio-stream = "0.1"
 serde_yaml = "0.9"
 rhai = { version = "1", features = ["serde"] }
 
+arrow = { version = "54", default-features = false }
+parquet = { version = "54", default-features = false, features = ["arrow", "zstd"] }
+duckdb = { version = "1.1", features = ["bundled", "parquet"] }
+dirs = "5"
+tempfile = "3"
+
 # Internal crates
 ayas-core = { path = "crates/ayas-core" }
 ayas-chain = { path = "crates/ayas-chain" }
@@ -39,3 +46,4 @@ ayas-graph = { path = "crates/ayas-graph" }
 ayas-agent = { path = "crates/ayas-agent" }
 ayas-deep-research = { path = "crates/ayas-deep-research" }
 ayas-adl = { path = "crates/ayas-adl" }
+ayas-smith = { path = "crates/ayas-smith" }

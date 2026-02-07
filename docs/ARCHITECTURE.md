@@ -22,9 +22,9 @@ ayas-core
   ^       ^
   |        \
 ayas-chain  ayas-graph
-               ^
-               |
-            ayas-agent
+               ^    ^
+               |     \
+            ayas-agent  ayas-adl
 
 ayas-core
   ^
@@ -34,7 +34,7 @@ ayas-deep-research
 ayas-examples (各クレートを利用)
 ```
 
-## テスト概要 (155 テスト)
+## テスト概要 (198 テスト)
 
 | クレート | ユニット | 統合/E2E | 合計 |
 |---|---|---|---|
@@ -43,7 +43,8 @@ ayas-examples (各クレートを利用)
 | ayas-graph | 37 | 10 + 5 | 52 |
 | ayas-agent | 6 | 3 | 9 |
 | ayas-deep-research | 24 | 3 | 27 |
-| **合計** | | | **155** |
+| ayas-adl | 35 | 8 | 43 |
+| **合計** | | | **198** |
 
 ---
 
@@ -511,7 +512,164 @@ impl Runnable for DeepResearchRunnable {
 
 ---
 
-## 6. ayas-examples — 使用例
+## 6. ayas-adl — Agent Design Language
+
+エージェントグラフを YAML/JSON で宣言的に定義し、Rust の再コンパイルなしに動的にグラフを構築・実行するための中間表現言語。Web アプリケーション上のビジュアルエージェントビルダーの基盤。
+
+### 追加依存
+
+- **serde_yaml** — YAML パース
+- **rhai** (serde feature) — 条件式のサンドボックス評価エンジン
+
+### ADL ドキュメント構造
+
+```yaml
+version: "1.0"
+agent:
+  name: "my-agent"
+  description: "説明文"
+channels:
+  - name: topic
+    type: last_value      # last_value | append | topic
+    default: ""
+nodes:
+  - id: explainer
+    type: llm             # レジストリに登録済みの型
+    config:
+      system_prompt: "..."
+      input_key: topic
+      output_key: result
+edges:
+  - from: __start__       # START も可
+    to: explainer
+  - from: explainer
+    type: conditional
+    conditions:
+      - expression: 'state.score > 80'
+        to: path_a
+      - expression: default     # フォールバック（常に true）
+        to: path_b
+  - from: path_a
+    to: __end__           # END も可
+```
+
+### AdlError — エラー型
+
+```
+AdlError
+├── Parse(String)          — YAML/JSON パースエラー
+├── Validation(String)     — バリデーション違反
+├── UnknownNodeType        — レジストリ未登録のノード型
+├── MissingConfig          — ノード設定の必須フィールド不足
+├── ExpressionError        — Rhai 式の評価エラー
+└── Yaml(serde_yaml::Error)
+```
+
+`From<AdlError> for AyasError` は `AyasError::Other(e.to_string())` にマッピング（ayas-core への逆依存を回避）。
+
+### 型定義 (types.rs)
+
+| 型 | 説明 |
+|---|---|
+| `AdlDocument` | トップレベル文書: version, agent, channels, nodes, edges |
+| `AgentMetadata` | エージェント名・説明 |
+| `AdlChannel` | チャネル定義: name, type, schema, default |
+| `AdlChannelType` | `LastValue` / `Append` / `Topic`（Topic は Append にマッピング） |
+| `AdlNode` | ノード定義: id, type, config |
+| `AdlEdge` | エッジ定義: from, to, type, conditions |
+| `AdlEdgeType` | `Static` / `Conditional` |
+| `AdlCondition` | 条件: expression, to |
+
+`normalize_sentinel()` — `"START"` / `"__start__"` と `"END"` / `"__end__"` の両方を正規化。
+
+### ComponentRegistry
+
+ノード型文字列をファクトリ関数にマッピングするレジストリ。
+
+```rust
+pub type NodeFactory =
+    Arc<dyn Fn(&str, &HashMap<String, Value>) -> Result<NodeFn, AdlError> + Send + Sync>;
+
+let mut registry = ComponentRegistry::with_builtins();
+registry.register("llm", my_llm_factory);
+```
+
+**ビルトインノード型:**
+
+| 型名 | 動作 |
+|---|---|
+| `passthrough` | 入力状態をそのまま返す |
+| `transform` | `config.mapping` に従い入力キーを出力キーにコピー |
+
+**カスタムノード型の登録:**
+
+`NodeFactory` は `(node_id, config) -> Result<NodeFn>` のシグネチャを持つクロージャ。`Arc<dyn ChatModel>` や API キーをクロージャにキャプチャすることで LLM ノード等を実装可能。
+
+### 式評価エンジン (expression.rs)
+
+Rhai スクリプトエンジンをサンドボックス設定で使用。
+
+```rust
+expression::evaluate("state.score > 80", &state) -> Result<bool>
+```
+
+- `"default"` — 常に `true` を返す（フォールバック条件）
+- `serde_json::Value` を `rhai::serde::to_dynamic()` で変換し、`state` 変数としてスコープに注入
+- **サンドボックス制約:** max_operations=10,000, max_call_levels=8, max_string_size=4,096
+
+**Sync 問題の対処:** Rhai `Engine` は `!Sync` のため、`ConditionalEdge` の `route_fn` クロージャ内では毎回新しい Engine を生成して評価する。
+
+### バリデーション (validation.rs)
+
+`validate_document(doc, registry)` で以下の6項目を検証:
+
+1. **バージョン** — `"1.0"` のみサポート
+2. **ノードID** — 重複禁止、予約語 (`__start__`, `__end__`) 禁止
+3. **ノード型** — レジストリに登録済みか
+4. **エッジ参照** — from/to が存在するノードまたはセンチネルか
+5. **エントリポイント** — `__start__` からのエッジが存在するか
+6. **条件辺** — `type: conditional` なエッジに `conditions` が存在するか
+
+### AdlBuilder
+
+ADL ドキュメントから `CompiledStateGraph` を構築するビルダー。
+
+```rust
+let builder = AdlBuilder::with_defaults();  // ビルトイン型付き
+let compiled = builder.build_from_yaml(yaml_str)?;
+let result = compiled.invoke(input, &config).await?;
+```
+
+**処理フロー:**
+
+```
+YAML/JSON 文字列
+  → serde デシリアライズ → AdlDocument
+  → validate_document()
+  → チャネル構築: AdlChannelType → ChannelSpec
+  → ノード構築: registry.create_node() → graph.add_node()
+  → エッジ構築:
+      from: __start__ → graph.set_entry_point(to)
+      to: __end__     → graph.set_finish_point(from)
+      conditional     → ConditionalEdge (Rhai 式を順次評価)
+  → graph.compile() → CompiledStateGraph
+```
+
+### ADL → ayas-graph マッピング
+
+| ADL | ayas-graph API |
+|---|---|
+| `channels[].type: "last_value"` | `StateGraph::add_channel(name, ChannelSpec::LastValue { default })` |
+| `channels[].type: "append"/"topic"` | `StateGraph::add_channel(name, ChannelSpec::Append)` |
+| `nodes[]` | `registry.create_node()` → `StateGraph::add_node()` |
+| `edges[].from: "__start__"` | `StateGraph::set_entry_point(to)` |
+| `edges[].to: "__end__"` | `StateGraph::set_finish_point(from)` |
+| 静的辺 | `StateGraph::add_edge(from, to)` |
+| 条件辺 | `StateGraph::add_conditional_edges(ConditionalEdge)` |
+
+---
+
+## 7. ayas-examples — 使用例
 
 実際の API プロバイダとの統合例。
 
@@ -520,6 +678,21 @@ impl Runnable for DeepResearchRunnable {
 | `gemini_chat.rs` | Google Gemini API を使ったチャット |
 | `claude_chat.rs` | Anthropic Claude API を使ったチャット |
 | `openai_chat.rs` | OpenAI API を使ったチャット |
+| `adl_gemini.rs` | Gemini でパイプライン YAML を生成し、ADL で構築・実行 |
+
+### adl_gemini.rs — AI 生成パイプラインの E2E 例
+
+Gemini 3 Flash Preview を使い、以下の3ステップを実行:
+
+1. **パイプライン生成** — Gemini に ADL YAML 定義を生成させる
+2. **グラフ構築** — `AdlBuilder` で YAML → `CompiledStateGraph` に変換
+3. **パイプライン実行** — 生成されたグラフを `invoke()` で実行
+
+カスタム `llm` ノードファクトリを `ComponentRegistry` に登録し、パイプライン内のノードが Gemini API を呼び出す構成。
+
+```bash
+GEMINI_API_KEY=... cargo run --example adl_gemini
+```
 
 ---
 
@@ -529,5 +702,6 @@ impl Runnable for DeepResearchRunnable {
 2. **型安全** — 入出力型の不一致はコンパイル時に検出
 3. **Send + Sync** — すべてのコンポーネントがスレッド安全
 4. **ステートレス呼び出し** — `ChannelSpec` ファクトリにより、各 `invoke()` が独立した状態を持つ
-5. **テストファースト** — 155 テストで品質を保証、clippy clean
-6. **ワークスペース依存** — 共通依存はワークスペースレベルで管理
+5. **宣言的構築** — ADL により YAML/JSON でグラフを定義し、再コンパイル不要で動的構築
+6. **テストファースト** — 198 テストで品質を保証、clippy clean
+7. **ワークスペース依存** — 共通依存はワークスペースレベルで管理

@@ -9,6 +9,14 @@ publish = false
 name = "gemini_chat"
 path = "examples/gemini_chat.rs"
 
+[[example]]
+name = "claude_chat"
+path = "examples/claude_chat.rs"
+
+[[example]]
+name = "openai_chat"
+path = "examples/openai_chat.rs"
+
 [dependencies]
 ayas-core = { workspace = true }
 ayas-chain = { workspace = true }

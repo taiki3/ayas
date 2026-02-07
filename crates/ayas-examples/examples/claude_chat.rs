@@ -17,7 +17,9 @@ use ayas_chain::parser::StringOutputParser;
 use ayas_chain::prompt::PromptTemplate;
 use ayas_core::config::RunnableConfig;
 use ayas_core::error::{AyasError, ModelError, Result};
-use ayas_core::message::{AIContent, Message, UsageMetadata};
+use ayas_core::message::{
+    AIContent, ContentPart, ContentSource, Message, MessageContent, UsageMetadata,
+};
 use ayas_core::model::{CallOptions, ChatModel, ChatResult};
 use ayas_core::runnable::{Runnable, RunnableExt};
 
@@ -38,20 +40,59 @@ struct AnthropicRequest {
     stop_sequences: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: AnthropicContent,
+}
+
+/// Anthropic content: text-only or multimodal parts array.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum AnthropicContent {
+    Text(String),
+    Parts(Vec<AnthropicContentPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum AnthropicContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
+    #[serde(rename = "document")]
+    Document { source: AnthropicDocSource },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum AnthropicImageSource {
+    #[serde(rename = "base64")]
+    Base64 { media_type: String, data: String },
+    #[serde(rename = "url")]
+    Url { url: String },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum AnthropicDocSource {
+    #[serde(rename = "base64")]
+    Base64 { media_type: String, data: String },
+    #[serde(rename = "url")]
+    Url { url: String },
+    #[serde(rename = "file")]
+    File { file_id: String },
 }
 
 #[derive(Deserialize)]
 struct AnthropicResponse {
-    content: Vec<AnthropicContent>,
+    content: Vec<AnthropicResponseContent>,
     usage: AnthropicUsage,
 }
 
 #[derive(Deserialize)]
-struct AnthropicContent {
+struct AnthropicResponseContent {
     text: String,
 }
 
@@ -69,6 +110,57 @@ struct AnthropicError {
 #[derive(Deserialize)]
 struct AnthropicErrorDetail {
     message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Conversion helpers
+// ---------------------------------------------------------------------------
+
+fn message_content_to_anthropic(mc: &MessageContent) -> AnthropicContent {
+    match mc {
+        MessageContent::Text(s) => AnthropicContent::Text(s.clone()),
+        MessageContent::Parts(parts) => {
+            AnthropicContent::Parts(parts.iter().map(content_part_to_anthropic).collect())
+        }
+    }
+}
+
+fn content_part_to_anthropic(part: &ContentPart) -> AnthropicContentPart {
+    match part {
+        ContentPart::Text { text } => AnthropicContentPart::Text { text: text.clone() },
+        ContentPart::Image { source } => AnthropicContentPart::Image {
+            source: content_source_to_anthropic_image(source),
+        },
+        ContentPart::File { source } => AnthropicContentPart::Document {
+            source: content_source_to_anthropic_doc(source),
+        },
+    }
+}
+
+fn content_source_to_anthropic_image(source: &ContentSource) -> AnthropicImageSource {
+    match source {
+        ContentSource::Base64 { media_type, data } => AnthropicImageSource::Base64 {
+            media_type: media_type.clone(),
+            data: data.clone(),
+        },
+        ContentSource::Url { url, .. } => AnthropicImageSource::Url { url: url.clone() },
+        ContentSource::FileId { file_id } => AnthropicImageSource::Url {
+            url: file_id.clone(),
+        },
+    }
+}
+
+fn content_source_to_anthropic_doc(source: &ContentSource) -> AnthropicDocSource {
+    match source {
+        ContentSource::Base64 { media_type, data } => AnthropicDocSource::Base64 {
+            media_type: media_type.clone(),
+            data: data.clone(),
+        },
+        ContentSource::Url { url, .. } => AnthropicDocSource::Url { url: url.clone() },
+        ContentSource::FileId { file_id } => AnthropicDocSource::File {
+            file_id: file_id.clone(),
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,24 +189,25 @@ impl ClaudeChatModel {
         for msg in messages {
             match msg {
                 Message::System { content } => {
-                    system = Some(content.clone());
+                    // Anthropic system is text-only; extract text from multimodal
+                    system = Some(content.text());
                 }
                 Message::User { content } => {
                     api_messages.push(AnthropicMessage {
                         role: "user".into(),
-                        content: content.clone(),
+                        content: message_content_to_anthropic(content),
                     });
                 }
                 Message::AI(ai) => {
                     api_messages.push(AnthropicMessage {
                         role: "assistant".into(),
-                        content: ai.content.clone(),
+                        content: AnthropicContent::Text(ai.content.clone()),
                     });
                 }
                 Message::Tool { content, .. } => {
                     api_messages.push(AnthropicMessage {
                         role: "user".into(),
-                        content: content.clone(),
+                        content: AnthropicContent::Text(content.clone()),
                     });
                 }
             }

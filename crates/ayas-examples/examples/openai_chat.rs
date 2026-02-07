@@ -17,7 +17,9 @@ use ayas_chain::parser::StringOutputParser;
 use ayas_chain::prompt::PromptTemplate;
 use ayas_core::config::RunnableConfig;
 use ayas_core::error::{AyasError, ModelError, Result};
-use ayas_core::message::{AIContent, Message, UsageMetadata};
+use ayas_core::message::{
+    AIContent, ContentPart, ContentSource, Message, MessageContent, UsageMetadata,
+};
 use ayas_core::model::{CallOptions, ChatModel, ChatResult};
 use ayas_core::runnable::{Runnable, RunnableExt};
 
@@ -37,10 +39,39 @@ struct OpenAIRequest {
     stop: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct OpenAIMessage {
     role: String,
-    content: String,
+    content: OpenAIContent,
+}
+
+/// OpenAI content: text-only or multimodal parts array.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OpenAIContent {
+    Text(String),
+    Parts(Vec<OpenAIContentPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum OpenAIContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OpenAIImageUrl },
+}
+
+#[derive(Serialize)]
+struct OpenAIImageUrl {
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAIResponseMessage {
+    content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -51,7 +82,7 @@ struct OpenAIResponse {
 
 #[derive(Deserialize)]
 struct OpenAIChoice {
-    message: OpenAIMessage,
+    message: OpenAIResponseMessage,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +100,59 @@ struct OpenAIError {
 #[derive(Deserialize)]
 struct OpenAIErrorDetail {
     message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Conversion helpers
+// ---------------------------------------------------------------------------
+
+fn message_content_to_openai(mc: &MessageContent) -> OpenAIContent {
+    match mc {
+        MessageContent::Text(s) => OpenAIContent::Text(s.clone()),
+        MessageContent::Parts(parts) => {
+            OpenAIContent::Parts(parts.iter().map(content_part_to_openai).collect())
+        }
+    }
+}
+
+fn content_part_to_openai(part: &ContentPart) -> OpenAIContentPart {
+    match part {
+        ContentPart::Text { text } => OpenAIContentPart::Text { text: text.clone() },
+        ContentPart::Image { source } => OpenAIContentPart::ImageUrl {
+            image_url: content_source_to_openai_image(source),
+        },
+        // OpenAI doesn't natively support file parts — convert to text fallback
+        ContentPart::File { source } => OpenAIContentPart::Text {
+            text: format!("[file: {}]", content_source_to_uri(source)),
+        },
+    }
+}
+
+fn content_source_to_openai_image(source: &ContentSource) -> OpenAIImageUrl {
+    match source {
+        ContentSource::Url { url, detail } => OpenAIImageUrl {
+            url: url.clone(),
+            detail: detail.clone(),
+        },
+        ContentSource::Base64 { media_type, data } => OpenAIImageUrl {
+            url: format!("data:{};base64,{}", media_type, data),
+            detail: None,
+        },
+        ContentSource::FileId { file_id } => OpenAIImageUrl {
+            url: file_id.clone(),
+            detail: None,
+        },
+    }
+}
+
+fn content_source_to_uri(source: &ContentSource) -> String {
+    match source {
+        ContentSource::Url { url, .. } => url.clone(),
+        ContentSource::Base64 { media_type, data } => {
+            format!("data:{};base64,{}", media_type, data)
+        }
+        ContentSource::FileId { file_id } => file_id.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,19 +180,19 @@ impl OpenAIChatModel {
             .map(|msg| match msg {
                 Message::System { content } => OpenAIMessage {
                     role: "system".into(),
-                    content: content.clone(),
+                    content: message_content_to_openai(content),
                 },
                 Message::User { content } => OpenAIMessage {
                     role: "user".into(),
-                    content: content.clone(),
+                    content: message_content_to_openai(content),
                 },
                 Message::AI(ai) => OpenAIMessage {
                     role: "assistant".into(),
-                    content: ai.content.clone(),
+                    content: OpenAIContent::Text(ai.content.clone()),
                 },
                 Message::Tool { content, .. } => OpenAIMessage {
                     role: "user".into(),
-                    content: content.clone(),
+                    content: OpenAIContent::Text(content.clone()),
                 },
             })
             .collect();
@@ -167,7 +251,7 @@ impl ChatModel for OpenAIChatModel {
         let text = api_response
             .choices
             .first()
-            .map(|c| c.message.content.clone())
+            .and_then(|c| c.message.content.clone())
             .unwrap_or_default();
 
         let usage = api_response.usage.map(|u| UsageMetadata {

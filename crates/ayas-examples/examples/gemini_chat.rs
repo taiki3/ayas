@@ -1,7 +1,7 @@
 //! Gemini API integration example.
 //!
 //! Demonstrates using `ChatModel` trait with Google Gemini API,
-//! chain composition with `PromptTemplate` → model → `StringOutputParser`,
+//! chain composition with `PromptTemplate` -> model -> `StringOutputParser`,
 //! and batch processing.
 //!
 //! ```bash
@@ -17,7 +17,9 @@ use ayas_chain::parser::StringOutputParser;
 use ayas_chain::prompt::PromptTemplate;
 use ayas_core::config::RunnableConfig;
 use ayas_core::error::{AyasError, ModelError, Result};
-use ayas_core::message::{AIContent, Message, UsageMetadata};
+use ayas_core::message::{
+    AIContent, ContentPart, ContentSource, Message, MessageContent, UsageMetadata,
+};
 use ayas_core::model::{CallOptions, ChatModel, ChatResult};
 use ayas_core::runnable::{Runnable, RunnableExt};
 
@@ -42,8 +44,28 @@ struct GeminiContent {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiPart {
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_data: Option<GeminiFileData>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiInlineData {
+    mime_type: String,
+    data: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFileData {
+    mime_type: String,
+    file_uri: String,
 }
 
 #[derive(Serialize)]
@@ -79,6 +101,63 @@ struct GeminiUsageMetadata {
 }
 
 // ---------------------------------------------------------------------------
+// Conversion helpers
+// ---------------------------------------------------------------------------
+
+fn text_part(text: String) -> GeminiPart {
+    GeminiPart {
+        text: Some(text),
+        inline_data: None,
+        file_data: None,
+    }
+}
+
+fn message_content_to_gemini_parts(mc: &MessageContent) -> Vec<GeminiPart> {
+    match mc {
+        MessageContent::Text(s) => vec![text_part(s.clone())],
+        MessageContent::Parts(parts) => parts.iter().map(content_part_to_gemini).collect(),
+    }
+}
+
+fn content_part_to_gemini(part: &ContentPart) -> GeminiPart {
+    match part {
+        ContentPart::Text { text } => text_part(text.clone()),
+        ContentPart::Image { source } | ContentPart::File { source } => {
+            content_source_to_gemini(source)
+        }
+    }
+}
+
+fn content_source_to_gemini(source: &ContentSource) -> GeminiPart {
+    match source {
+        ContentSource::Base64 { media_type, data } => GeminiPart {
+            text: None,
+            inline_data: Some(GeminiInlineData {
+                mime_type: media_type.clone(),
+                data: data.clone(),
+            }),
+            file_data: None,
+        },
+        ContentSource::Url { url, .. } => GeminiPart {
+            text: None,
+            inline_data: None,
+            file_data: Some(GeminiFileData {
+                mime_type: String::new(),
+                file_uri: url.clone(),
+            }),
+        },
+        ContentSource::FileId { file_id } => GeminiPart {
+            text: None,
+            inline_data: None,
+            file_data: Some(GeminiFileData {
+                mime_type: String::new(),
+                file_uri: file_id.clone(),
+            }),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GeminiChatModel
 // ---------------------------------------------------------------------------
 
@@ -106,34 +185,25 @@ impl GeminiChatModel {
                 Message::System { content } => {
                     system_instruction = Some(GeminiContent {
                         role: None,
-                        parts: vec![GeminiPart {
-                            text: content.clone(),
-                        }],
+                        parts: message_content_to_gemini_parts(content),
                     });
                 }
                 Message::User { content } => {
                     contents.push(GeminiContent {
                         role: Some("user".into()),
-                        parts: vec![GeminiPart {
-                            text: content.clone(),
-                        }],
+                        parts: message_content_to_gemini_parts(content),
                     });
                 }
                 Message::AI(ai) => {
                     contents.push(GeminiContent {
                         role: Some("model".into()),
-                        parts: vec![GeminiPart {
-                            text: ai.content.clone(),
-                        }],
+                        parts: vec![text_part(ai.content.clone())],
                     });
                 }
                 Message::Tool { content, .. } => {
-                    // Treat tool results as user messages for simplicity
                     contents.push(GeminiContent {
                         role: Some("user".into()),
-                        parts: vec![GeminiPart {
-                            text: content.clone(),
-                        }],
+                        parts: vec![text_part(content.clone())],
                     });
                 }
             }
@@ -209,7 +279,7 @@ impl ChatModel for GeminiChatModel {
             .as_ref()
             .and_then(|c| c.first())
             .and_then(|c| c.content.parts.first())
-            .map(|p| p.text.clone())
+            .and_then(|p| p.text.clone())
             .unwrap_or_default();
 
         let usage = gemini_response.usage_metadata.map(|u| UsageMetadata {
@@ -297,7 +367,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     // -----------------------------------------------------------------------
-    // Demo 2: Chain composition (PromptTemplate → Model → StringOutputParser)
+    // Demo 2: Chain composition (PromptTemplate -> Model -> StringOutputParser)
     // -----------------------------------------------------------------------
     println!("\n=== Demo 2: Chain composition ===\n");
 

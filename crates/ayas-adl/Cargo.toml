@@ -1,0 +1,21 @@
+[package]
+name = "ayas-adl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent Design Language (ADL) for declarative agent graph construction"
+
+[dependencies]
+ayas-core = { workspace = true }
+ayas-graph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+rhai = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

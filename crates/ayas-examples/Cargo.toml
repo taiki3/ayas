@@ -17,11 +17,18 @@ path = "examples/claude_chat.rs"
 name = "openai_chat"
 path = "examples/openai_chat.rs"
 
+[[example]]
+name = "adl_gemini"
+path = "examples/adl_gemini.rs"
+
 [dependencies]
 ayas-core = { workspace = true }
 ayas-chain = { workspace = true }
+ayas-graph = { workspace = true }
+ayas-adl = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 reqwest = { workspace = true }

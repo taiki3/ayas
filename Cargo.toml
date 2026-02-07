@@ -6,6 +6,7 @@ members = [
     "crates/ayas-graph",
     "crates/ayas-agent",
     "crates/ayas-deep-research",
+    "crates/ayas-adl",
     "crates/ayas-examples",
 ]
 
@@ -28,6 +29,8 @@ tracing = "0.1"
 schemars = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-stream = "0.1"
+serde_yaml = "0.9"
+rhai = { version = "1", features = ["serde"] }
 
 # Internal crates
 ayas-core = { path = "crates/ayas-core" }
@@ -35,3 +38,4 @@ ayas-chain = { path = "crates/ayas-chain" }
 ayas-graph = { path = "crates/ayas-graph" }
 ayas-agent = { path = "crates/ayas-agent" }
 ayas-deep-research = { path = "crates/ayas-deep-research" }
+ayas-adl = { path = "crates/ayas-adl" }

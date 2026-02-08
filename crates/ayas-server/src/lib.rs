@@ -3,6 +3,7 @@ pub mod extractors;
 pub mod types;
 pub mod tools;
 pub mod graph_convert;
+pub mod graph_gen;
 pub mod api;
 pub mod sse;
 

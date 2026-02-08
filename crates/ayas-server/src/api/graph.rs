@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use axum::extract::State;
 use axum::response::Sse;
 use axum::response::sse::Event;
 use axum::{Json, Router, routing::post};
@@ -6,22 +9,40 @@ use futures::stream;
 use serde::Serialize;
 
 use ayas_core::config::RunnableConfig;
+use ayas_core::model::ChatModel;
 use ayas_graph::compiled::StepInfo;
+use ayas_llm::factory::create_chat_model;
+use ayas_llm::provider::Provider;
 
 use crate::error::AppError;
 use crate::extractors::ApiKeys;
 use crate::graph_convert::{convert_to_state_graph, validate_graph};
+use crate::graph_gen;
 use crate::sse::{sse_done, sse_event};
 use crate::types::{
     GraphChannelDto, GraphEdgeDto, GraphExecuteRequest, GraphGenerateRequest,
     GraphGenerateResponse, GraphNodeDto, GraphValidateRequest, GraphValidateResponse,
 };
 
+/// Factory function type for creating ChatModel instances.
+pub type GraphModelFactory =
+    Arc<dyn Fn(&Provider, String, String) -> Box<dyn ChatModel> + Send + Sync>;
+
+/// Create the default factory that delegates to ayas_llm::factory.
+pub fn default_graph_factory() -> GraphModelFactory {
+    Arc::new(|provider, api_key, model_id| create_chat_model(provider, api_key, model_id))
+}
+
 pub fn routes() -> Router {
+    routes_with_factory(default_graph_factory())
+}
+
+pub fn routes_with_factory(factory: GraphModelFactory) -> Router {
     Router::new()
         .route("/graph/validate", post(graph_validate))
         .route("/graph/execute", post(graph_execute))
         .route("/graph/generate", post(graph_generate))
+        .with_state(factory)
 }
 
 #[derive(Serialize)]
@@ -101,42 +122,53 @@ async fn graph_execute(
 }
 
 async fn graph_generate(
+    State(factory): State<GraphModelFactory>,
     api_keys: ApiKeys,
     Json(req): Json<GraphGenerateRequest>,
 ) -> Result<Json<GraphGenerateResponse>, AppError> {
-    // For now, return a simple template graph
-    // In the future, this would use an LLM to generate the graph
-    let _api_key = api_keys.get_key_for(&req.provider)?;
+    let api_key = api_keys.get_key_for(&req.provider)?;
+    let model = factory(&req.provider, api_key, req.model);
 
-    let nodes = vec![GraphNodeDto {
-        id: "transform_1".into(),
-        node_type: "transform".into(),
-        label: Some("Process Input".into()),
-        config: Some(serde_json::json!({"expression": "process"})),
-    }];
-    let edges = vec![
-        GraphEdgeDto {
-            from: "start".into(),
-            to: "transform_1".into(),
-            condition: None,
-        },
-        GraphEdgeDto {
-            from: "transform_1".into(),
-            to: "end".into(),
-            condition: None,
-        },
-    ];
-    let channels = vec![GraphChannelDto {
-        key: "value".into(),
-        channel_type: "LastValue".into(),
-        default: None,
-    }];
+    // Try LLM generation, fall back to template on failure
+    match graph_gen::generate_graph(model.as_ref(), &req.prompt).await {
+        Ok((nodes, edges, channels)) => Ok(Json(GraphGenerateResponse {
+            nodes,
+            edges,
+            channels,
+        })),
+        Err(_) => {
+            // Fallback: return a simple template
+            let nodes = vec![GraphNodeDto {
+                id: "transform_1".into(),
+                node_type: "transform".into(),
+                label: Some("Process Input".into()),
+                config: Some(serde_json::json!({"expression": "process"})),
+            }];
+            let edges = vec![
+                GraphEdgeDto {
+                    from: "start".into(),
+                    to: "transform_1".into(),
+                    condition: None,
+                },
+                GraphEdgeDto {
+                    from: "transform_1".into(),
+                    to: "end".into(),
+                    condition: None,
+                },
+            ];
+            let channels = vec![GraphChannelDto {
+                key: "value".into(),
+                channel_type: "LastValue".into(),
+                default: None,
+            }];
 
-    Ok(Json(GraphGenerateResponse {
-        nodes,
-        edges,
-        channels,
-    }))
+            Ok(Json(GraphGenerateResponse {
+                nodes,
+                edges,
+                channels,
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,8 +179,58 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use ayas_core::error::Result;
+    use ayas_core::message::{AIContent, UsageMetadata};
+
     fn app() -> Router {
         Router::new().nest("/api", routes())
+    }
+
+    /// Mock ChatModel that returns a preset JSON graph response.
+    struct MockGraphModel {
+        response: String,
+    }
+
+    #[async_trait]
+    impl ChatModel for MockGraphModel {
+        async fn generate(
+            &self,
+            _messages: &[ayas_core::message::Message],
+            _options: &ayas_core::model::CallOptions,
+        ) -> Result<ayas_core::model::ChatResult> {
+            Ok(ayas_core::model::ChatResult {
+                message: ayas_core::message::Message::AI(AIContent {
+                    content: self.response.clone(),
+                    tool_calls: Vec::new(),
+                    usage: Some(UsageMetadata {
+                        input_tokens: 100,
+                        output_tokens: 50,
+                        total_tokens: 150,
+                    }),
+                }),
+                usage: None,
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-graph-model"
+        }
+    }
+
+    fn mock_graph_factory(response: &str) -> (GraphModelFactory, Arc<AtomicUsize>) {
+        let resp = response.to_string();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+        let factory: GraphModelFactory = Arc::new(move |_provider, _key, _model| {
+            cc.fetch_add(1, Ordering::Relaxed);
+            Box::new(MockGraphModel {
+                response: resp.clone(),
+            })
+        });
+        (factory, call_count)
     }
 
     #[tokio::test]
@@ -279,7 +361,9 @@ mod tests {
 
     #[tokio::test]
     async fn graph_generate_returns_nodes() {
-        let app = app();
+        let graph_json = r#"{"nodes":[{"id":"qa_llm","type":"llm","label":"Q&A Model"}],"edges":[{"from":"start","to":"qa_llm"},{"from":"qa_llm","to":"end"}],"channels":[{"key":"value","type":"LastValue"}]}"#;
+        let (factory, count) = mock_graph_factory(graph_json);
+        let app = Router::new().nest("/api", routes_with_factory(factory));
         let body = serde_json::json!({
             "prompt": "Create a simple pipeline",
             "provider": "gemini",
@@ -300,10 +384,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(!result["nodes"].as_array().unwrap().is_empty());
         assert!(!result["edges"].as_array().unwrap().is_empty());
+        assert_eq!(result["nodes"][0]["id"], "qa_llm");
+    }
+
+    #[tokio::test]
+    async fn graph_generate_fallback_on_bad_response() {
+        // Return invalid JSON that can't be parsed as a graph
+        let (factory, _) = mock_graph_factory("I cannot generate a graph sorry");
+        let app = Router::new().nest("/api", routes_with_factory(factory));
+        let body = serde_json::json!({
+            "prompt": "Something weird",
+            "provider": "gemini",
+            "model": "gemini-2.0-flash"
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/graph/generate")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Gemini-Key", "test-key")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Falls back to template
+        assert_eq!(result["nodes"][0]["id"], "transform_1");
     }
 
     fn parse_sse_events(body: &[u8]) -> Vec<serde_json::Value> {

@@ -30,3 +30,5 @@ chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
+ayas-smith = { workspace = true }
+tempfile = { workspace = true }

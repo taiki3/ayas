@@ -8,7 +8,9 @@ members = [
     "crates/ayas-deep-research",
     "crates/ayas-adl",
     "crates/ayas-smith",
+    "crates/ayas-llm",
     "crates/ayas-examples",
+    "crates/ayas-server",
 ]
 
 [workspace.package]
@@ -33,6 +35,13 @@ tokio-stream = "0.1"
 serde_yaml = "0.9"
 rhai = { version = "1", features = ["serde"] }
 
+axum = { version = "0.8", features = ["json", "macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tower = { version = "0.5" }
+async-stream = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+meval = "0.2"
+
 arrow = { version = "54", default-features = false }
 parquet = { version = "54", default-features = false, features = ["arrow", "zstd"] }
 duckdb = { version = "1.1", features = ["bundled", "parquet"] }
@@ -47,3 +56,5 @@ ayas-agent = { path = "crates/ayas-agent" }
 ayas-deep-research = { path = "crates/ayas-deep-research" }
 ayas-adl = { path = "crates/ayas-adl" }
 ayas-smith = { path = "crates/ayas-smith" }
+ayas-llm = { path = "crates/ayas-llm" }
+ayas-server = { path = "crates/ayas-server" }

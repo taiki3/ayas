@@ -11,6 +11,7 @@ use serde::Serialize;
 use ayas_core::config::RunnableConfig;
 use ayas_core::model::ChatModel;
 use ayas_graph::compiled::StepInfo;
+use ayas_graph::stream::StreamEvent;
 use ayas_llm::factory::create_chat_model;
 use ayas_llm::provider::Provider;
 
@@ -19,6 +20,7 @@ use crate::extractors::ApiKeys;
 use crate::graph_convert::{convert_to_state_graph, validate_graph};
 use crate::graph_gen;
 use crate::sse::{sse_done, sse_event};
+use crate::tracing_middleware::{TracingContext, is_tracing_requested};
 use crate::types::{
     GraphChannelDto, GraphEdgeDto, GraphExecuteRequest, GraphGenerateRequest,
     GraphGenerateResponse, GraphNodeDto, GraphValidateRequest, GraphValidateResponse,
@@ -41,6 +43,7 @@ pub fn routes_with_factory(factory: GraphModelFactory) -> Router {
     Router::new()
         .route("/graph/validate", post(graph_validate))
         .route("/graph/execute", post(graph_execute))
+        .route("/graph/invoke-stream", post(graph_invoke_stream))
         .route("/graph/generate", post(graph_generate))
         .with_state(factory)
 }
@@ -75,8 +78,23 @@ async fn graph_validate(Json(req): Json<GraphValidateRequest>) -> Json<GraphVali
 }
 
 async fn graph_execute(
+    headers: axum::http::HeaderMap,
     Json(req): Json<GraphExecuteRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    // Set up optional tracing (env var or per-request header)
+    let tracing_ctx = TracingContext::from_env().or_else(|| {
+        if is_tracing_requested(&headers) {
+            Some(TracingContext::from_env_config())
+        } else {
+            None
+        }
+    });
+    let trace_input = if tracing_ctx.is_some() {
+        Some(req.input.clone())
+    } else {
+        None
+    };
+
     let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
     let config = RunnableConfig::default();
 
@@ -105,12 +123,26 @@ async fn graph_execute(
                     step_number: step.step_number,
                 }));
             }
+
+            // Record trace (non-blocking — submit_run sends to mpsc channel)
+            if let (Some(ctx), Some(input)) = (&tracing_ctx, &trace_input) {
+                ctx.record_graph_run("graph-execute", input, &output, None);
+            }
+
             events.push(sse_event(&GraphSseEvent::Complete {
                 output,
                 total_steps: captured_steps.len(),
             }));
         }
         Err(e) => {
+            if let (Some(ctx), Some(input)) = (&tracing_ctx, &trace_input) {
+                ctx.record_graph_run(
+                    "graph-execute",
+                    input,
+                    &serde_json::Value::Null,
+                    Some(&e.to_string()),
+                );
+            }
             events.push(sse_event(&GraphSseEvent::Error {
                 message: e.to_string(),
             }));
@@ -119,6 +151,72 @@ async fn graph_execute(
 
     events.push(sse_done());
     Ok(Sse::new(stream::iter(events)))
+}
+
+async fn graph_invoke_stream(
+    headers: axum::http::HeaderMap,
+    Json(req): Json<GraphExecuteRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    let tracing_ctx = TracingContext::from_env().or_else(|| {
+        if is_tracing_requested(&headers) {
+            Some(TracingContext::from_env_config())
+        } else {
+            None
+        }
+    });
+    let trace_input = if tracing_ctx.is_some() {
+        Some(req.input.clone())
+    } else {
+        None
+    };
+
+    let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
+    let config = RunnableConfig::default();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+
+    let input = req.input;
+
+    tokio::spawn(async move {
+        let _ = compiled.invoke_with_streaming(input, &config, tx).await;
+    });
+
+    let stream = async_stream::stream! {
+        let mut final_output = None;
+        let mut had_error = false;
+
+        while let Some(event) = rx.recv().await {
+            match &event {
+                StreamEvent::GraphComplete { output } => {
+                    final_output = Some(output.clone());
+                }
+                StreamEvent::Error { message } => {
+                    had_error = true;
+                    if let (Some(ctx), Some(input)) = (&tracing_ctx, &trace_input) {
+                        ctx.record_graph_run(
+                            "graph-invoke-stream",
+                            input,
+                            &serde_json::Value::Null,
+                            Some(message),
+                        );
+                    }
+                }
+                _ => {}
+            }
+            yield sse_event(&event);
+        }
+
+        if !had_error {
+            if let (Some(ctx), Some(input)) = (&tracing_ctx, &trace_input) {
+                let output = final_output.unwrap_or(serde_json::Value::Null);
+                ctx.record_graph_run("graph-invoke-stream", input, &output, None);
+            }
+        }
+
+        yield sse_done();
+    };
+
+    Ok(Sse::new(stream))
 }
 
 async fn graph_generate(
@@ -505,5 +603,90 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.as_str().unwrap().contains("unknown_node")));
+    }
+
+    #[tokio::test]
+    async fn test_graph_invoke_stream_linear() {
+        let app = app();
+        let body = serde_json::json!({
+            "nodes": [
+                {"id": "a", "type": "passthrough"},
+                {"id": "b", "type": "passthrough"}
+            ],
+            "edges": [
+                {"from": "start", "to": "a"},
+                {"from": "a", "to": "b"},
+                {"from": "b", "to": "end"}
+            ],
+            "channels": [{"key": "value", "type": "LastValue"}],
+            "input": {"value": "hello"}
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/graph/invoke-stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let events = parse_sse_events(&bytes);
+
+        assert!(
+            events.iter().any(|e| e["type"] == "node_start"),
+            "Expected node_start event, got: {:?}",
+            events
+        );
+        assert!(
+            events.iter().any(|e| e["type"] == "node_end"),
+            "Expected node_end event, got: {:?}",
+            events
+        );
+        assert!(
+            events.iter().any(|e| e["type"] == "graph_complete"),
+            "Expected graph_complete event, got: {:?}",
+            events
+        );
+    }
+
+    #[tokio::test]
+    async fn test_graph_invoke_stream_empty_graph() {
+        let app = app();
+        let body = serde_json::json!({
+            "nodes": [],
+            "edges": [
+                {"from": "start", "to": "end"}
+            ],
+            "channels": [{"key": "value", "type": "LastValue"}],
+            "input": {"value": "test"}
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/graph/invoke-stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let events = parse_sse_events(&bytes);
+
+        assert!(
+            events.iter().any(|e| e["type"] == "graph_complete"),
+            "Expected graph_complete event, got: {:?}",
+            events
+        );
     }
 }

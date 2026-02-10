@@ -13,6 +13,7 @@ members = [
     "crates/ayas-examples",
     "crates/ayas-server",
     "crates/ayas-rag",
+    "crates/ayas-eval",
 ]
 
 [workspace.package]
@@ -64,3 +65,4 @@ ayas-smith = { path = "crates/ayas-smith" }
 ayas-llm = { path = "crates/ayas-llm" }
 ayas-server = { path = "crates/ayas-server" }
 ayas-rag = { path = "crates/ayas-rag" }
+ayas-eval = { path = "crates/ayas-eval" }

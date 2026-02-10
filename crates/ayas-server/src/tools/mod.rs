@@ -13,7 +13,7 @@ impl BuiltinTools {
         vec![
             Box::new(calculator::CalculatorTool),
             Box::new(datetime::DateTimeTool),
-            Box::new(web_search::WebSearchTool),
+            Box::new(web_search::WebSearchTool::new()),
         ]
     }
 

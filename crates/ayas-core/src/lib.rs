@@ -11,6 +11,8 @@ pub mod prelude {
     pub use crate::error::{AyasError, Result};
     pub use crate::message::{ContentPart, ContentSource, Message, MessageContent, ToolCall};
     pub use crate::model::{CallOptions, ChatModel, ChatResult};
-    pub use crate::runnable::{Runnable, RunnableExt};
+    pub use crate::runnable::{
+        Runnable, RunnableBranch, RunnableExt, RunnablePassthrough, RunnableWithFallback,
+    };
     pub use crate::tool::{Tool, ToolDefinition};
 }

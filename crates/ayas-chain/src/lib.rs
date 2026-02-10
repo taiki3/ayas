@@ -9,7 +9,10 @@ pub mod prelude {
     pub use crate::lambda::RunnableLambda;
     pub use crate::mock::MockChatModel;
     pub use crate::parallel::RunnableParallel;
-    pub use crate::parser::{MessageContentParser, StringOutputParser};
+    pub use crate::parser::{
+        JsonOutputParser, MessageContentParser, RegexOutputParser, StringOutputParser,
+        StructuredOutputParser,
+    };
     pub use crate::prompt::PromptTemplate;
     pub use crate::sequence::RunnableSequence;
 }

@@ -83,7 +83,7 @@ impl CompiledStateGraph {
     }
 
     /// Build a state Value from all channels.
-    fn build_state(channels: &HashMap<String, Box<dyn Channel>>) -> Value {
+    pub(crate) fn build_state(channels: &HashMap<String, Box<dyn Channel>>) -> Value {
         let mut map = serde_json::Map::new();
         for (key, ch) in channels {
             map.insert(key.clone(), ch.get().clone());
@@ -92,7 +92,7 @@ impl CompiledStateGraph {
     }
 
     /// Update channels from a node's partial output.
-    fn update_channels(
+    pub(crate) fn update_channels(
         channels: &mut HashMap<String, Box<dyn Channel>>,
         output: &Value,
     ) -> Result<()> {
@@ -107,7 +107,7 @@ impl CompiledStateGraph {
     }
 
     /// Determine the next nodes to execute after a given node.
-    fn next_nodes(&self, current: &str, state: &Value) -> Vec<String> {
+    pub(crate) fn next_nodes(&self, current: &str, state: &Value) -> Vec<String> {
         // Check conditional edges first (they take priority)
         for ce in &self.conditional_edges {
             if ce.from == current {

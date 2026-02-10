@@ -10,6 +10,7 @@ description = "Chain composition primitives for the Ayas LangChain ecosystem"
 ayas-core.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

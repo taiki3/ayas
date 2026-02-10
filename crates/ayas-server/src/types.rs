@@ -134,6 +134,25 @@ pub struct GraphGenerateResponse {
     pub channels: Vec<GraphChannelDto>,
 }
 
+// --- HITL ---
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteResumableRequest {
+    pub thread_id: String,
+    pub nodes: Vec<GraphNodeDto>,
+    pub edges: Vec<GraphEdgeDto>,
+    #[serde(default)]
+    pub channels: Vec<GraphChannelDto>,
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResumeRequest {
+    pub session_id: String,
+    pub resume_value: serde_json::Value,
+}
+
 // --- Research ---
 
 #[derive(Debug, Deserialize)]

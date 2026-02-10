@@ -10,6 +10,7 @@ description = "Web server for the Ayas Playground"
 ayas-core = { workspace = true }
 ayas-llm = { workspace = true }
 ayas-graph = { workspace = true }
+ayas-checkpoint = { workspace = true }
 ayas-deep-research = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
@@ -25,10 +26,12 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+ayas-smith = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
-ayas-smith = { workspace = true }
 tempfile = { workspace = true }

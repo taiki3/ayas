@@ -4,6 +4,7 @@ members = [
     "crates/ayas-core",
     "crates/ayas-chain",
     "crates/ayas-graph",
+    "crates/ayas-checkpoint",
     "crates/ayas-agent",
     "crates/ayas-deep-research",
     "crates/ayas-adl",
@@ -11,6 +12,7 @@ members = [
     "crates/ayas-llm",
     "crates/ayas-examples",
     "crates/ayas-server",
+    "crates/ayas-rag",
 ]
 
 [workspace.package]
@@ -47,14 +49,18 @@ parquet = { version = "54", default-features = false, features = ["arrow", "zstd
 duckdb = { version = "1.1", features = ["bundled", "parquet"] }
 dirs = "5"
 tempfile = "3"
+rusqlite = { version = "0.34", features = ["bundled"] }
+proptest = "1"
 
 # Internal crates
 ayas-core = { path = "crates/ayas-core" }
 ayas-chain = { path = "crates/ayas-chain" }
 ayas-graph = { path = "crates/ayas-graph" }
+ayas-checkpoint = { path = "crates/ayas-checkpoint" }
 ayas-agent = { path = "crates/ayas-agent" }
 ayas-deep-research = { path = "crates/ayas-deep-research" }
 ayas-adl = { path = "crates/ayas-adl" }
 ayas-smith = { path = "crates/ayas-smith" }
 ayas-llm = { path = "crates/ayas-llm" }
 ayas-server = { path = "crates/ayas-server" }
+ayas-rag = { path = "crates/ayas-rag" }

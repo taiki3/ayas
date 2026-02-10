@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use ayas_core::error::{GraphError, Result};
 use serde_json::Value;
 
-use crate::channel::ChannelSpec;
+use crate::channel::{AggregateOp, ChannelSpec};
 use crate::compiled::CompiledStateGraph;
 use crate::constants::{END, START};
 use crate::edge::{ConditionalEdge, Edge};
@@ -58,6 +58,30 @@ impl StateGraph {
     /// Convenience: add an `AppendChannel`.
     pub fn add_append_channel(&mut self, name: impl Into<String>) -> &mut Self {
         self.add_channel(name, ChannelSpec::Append)
+    }
+
+    /// Convenience: add a `BinaryOperatorAggregate` channel.
+    pub fn add_binary_operator_channel(
+        &mut self,
+        name: impl Into<String>,
+        default: Value,
+        op: AggregateOp,
+    ) -> &mut Self {
+        self.add_channel(name, ChannelSpec::BinaryOperator { default, op })
+    }
+
+    /// Convenience: add an `EphemeralValue` channel.
+    pub fn add_ephemeral_channel(&mut self, name: impl Into<String>) -> &mut Self {
+        self.add_channel(name, ChannelSpec::Ephemeral)
+    }
+
+    /// Convenience: add a `TopicChannel`.
+    pub fn add_topic_channel(
+        &mut self,
+        name: impl Into<String>,
+        accumulate: bool,
+    ) -> &mut Self {
+        self.add_channel(name, ChannelSpec::Topic { accumulate })
     }
 
     /// Add a node to the graph.

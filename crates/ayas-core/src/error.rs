@@ -77,6 +77,12 @@ pub enum GraphError {
         node: String,
         source: Box<AyasError>,
     },
+
+    #[error("Checkpoint error: {0}")]
+    Checkpoint(String),
+
+    #[error("Thread not found: {0}")]
+    ThreadNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, AyasError>;

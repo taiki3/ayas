@@ -1,21 +1,20 @@
 [package]
-name = "ayas-graph"
+name = "ayas-checkpoint"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Graph execution engine for the Ayas framework"
+description = "Checkpoint and persistence layer for the Ayas graph execution engine"
 
 [dependencies]
 ayas-core = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
-futures = { workspace = true }
-ayas-checkpoint = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

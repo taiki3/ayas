@@ -10,6 +10,7 @@ pub enum AppError {
     MissingApiKey(String),
     Ayas(AyasError),
     Internal(String),
+    NotFound(String),
 }
 
 impl From<AyasError> for AppError {
@@ -37,6 +38,7 @@ impl IntoResponse for AppError {
             ),
             AppError::Ayas(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
         };
 
         let body = json!({ "error": message });

@@ -1,10 +1,10 @@
 [package]
-name = "ayas-graph"
+name = "ayas-rag"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Graph execution engine for the Ayas framework"
+description = "RAG (Retrieval-Augmented Generation) support for the Ayas framework"
 
 [dependencies]
 ayas-core = { workspace = true }
@@ -12,10 +12,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-futures = { workspace = true }
-ayas-checkpoint = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

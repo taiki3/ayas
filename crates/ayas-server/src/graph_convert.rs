@@ -1,5 +1,6 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use ayas_checkpoint::prelude::interrupt_output;
 use ayas_core::error::Result;
 use ayas_graph::channel::ChannelSpec;
 use ayas_graph::compiled::CompiledStateGraph;
@@ -110,6 +111,32 @@ pub fn convert_to_state_graph(
                             );
                         }
                         Ok(state)
+                    })
+                });
+                graph.add_node(node_fn)?;
+            }
+            "interrupt" => {
+                let config = node.config.clone().unwrap_or(Value::Null);
+                let id = node.id.clone();
+                let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
+                    let config = config.clone();
+                    Box::pin(async move {
+                        let interrupt_val = config
+                            .get("value")
+                            .cloned()
+                            .unwrap_or_else(|| json!({"prompt": "Human input needed"}));
+                        let mut output = interrupt_output(interrupt_val);
+                        // Merge state values through
+                        if let Value::Object(ref state_map) = state {
+                            if let Value::Object(ref mut out_map) = output {
+                                for (k, v) in state_map {
+                                    if !out_map.contains_key(k) {
+                                        out_map.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                        }
+                        Ok(output)
                     })
                 });
                 graph.add_node(node_fn)?;

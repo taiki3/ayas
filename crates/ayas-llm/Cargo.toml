@@ -17,3 +17,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ayas-agent = { workspace = true }
+ayas-chain = { workspace = true }

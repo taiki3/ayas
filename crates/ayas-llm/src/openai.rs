@@ -102,6 +102,8 @@ pub enum OpenAIContentPart {
     Text { text: String },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: OpenAIImageUrl },
+    #[serde(rename = "file")]
+    File { file: OpenAIFileRef },
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +111,11 @@ pub struct OpenAIImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIFileRef {
+    pub file_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,9 +186,17 @@ pub fn content_part_to_openai(part: &ContentPart) -> OpenAIContentPart {
         ContentPart::Image { source } => OpenAIContentPart::ImageUrl {
             image_url: content_source_to_openai_image(source),
         },
-        // OpenAI doesn't natively support file parts — convert to text fallback
-        ContentPart::File { source } => OpenAIContentPart::Text {
-            text: format!("[file: {}]", content_source_to_uri(source)),
+        ContentPart::File { source } => match source {
+            // Native file reference via OpenAI Files API
+            ContentSource::FileId { file_id } => OpenAIContentPart::File {
+                file: OpenAIFileRef {
+                    file_id: file_id.clone(),
+                },
+            },
+            // URL/Base64 files cannot be sent inline; fall back to text
+            _ => OpenAIContentPart::Text {
+                text: format!("[file: {}]", content_source_to_uri(source)),
+            },
         },
     }
 }
@@ -599,6 +614,59 @@ mod tests {
         match &req.messages[0].content {
             OpenAIContent::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn build_request_file_with_file_id() {
+        let model = make_model();
+        let messages = vec![Message::user_with_parts(vec![
+            ContentPart::Text {
+                text: "summarize this".into(),
+            },
+            ContentPart::File {
+                source: ContentSource::FileId {
+                    file_id: "file-abc123".into(),
+                },
+            },
+        ])];
+        let options = CallOptions::default();
+        let req = model.build_request(&messages, &options);
+        match &req.messages[0].content {
+            OpenAIContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[1] {
+                    OpenAIContentPart::File { file } => {
+                        assert_eq!(file.file_id, "file-abc123");
+                    }
+                    _ => panic!("expected File part"),
+                }
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn build_request_file_url_fallback() {
+        let model = make_model();
+        let messages = vec![Message::user_with_parts(vec![ContentPart::File {
+            source: ContentSource::Url {
+                url: "https://example.com/doc.pdf".into(),
+                detail: None,
+            },
+        }])];
+        let options = CallOptions::default();
+        let req = model.build_request(&messages, &options);
+        match &req.messages[0].content {
+            OpenAIContent::Parts(parts) => {
+                match &parts[0] {
+                    OpenAIContentPart::Text { text } => {
+                        assert!(text.contains("https://example.com/doc.pdf"));
+                    }
+                    _ => panic!("expected Text fallback for URL file"),
+                }
             }
             _ => panic!("expected Parts"),
         }

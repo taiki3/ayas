@@ -176,6 +176,8 @@ pub struct ResearchInvokeRequest {
     pub agent: Option<String>,
     #[serde(default)]
     pub previous_interaction_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<ayas_core::message::ContentPart>,
 }
 
 #[cfg(test)]
@@ -254,5 +256,20 @@ mod tests {
         let req: ResearchInvokeRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.query, "What is Rust?");
         assert_eq!(req.agent.as_deref(), Some("gemini"));
+        assert!(req.attachments.is_empty());
+    }
+
+    #[test]
+    fn research_request_with_attachments() {
+        let json = r#"{
+            "query": "Summarize this document",
+            "attachments": [
+                {"type": "file", "source": {"type": "file_id", "file_id": "file-xyz"}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/img.png"}}
+            ]
+        }"#;
+        let req: ResearchInvokeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.query, "Summarize this document");
+        assert_eq!(req.attachments.len(), 2);
     }
 }

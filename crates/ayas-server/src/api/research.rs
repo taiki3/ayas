@@ -39,6 +39,9 @@ async fn research_invoke(
     let runnable = DeepResearchRunnable::new(client);
 
     let mut input = DeepResearchInput::new(&req.query);
+    if !req.attachments.is_empty() {
+        input = input.with_attachments(req.attachments);
+    }
     if let Some(agent) = req.agent {
         input = input.with_agent(agent);
     }

@@ -322,7 +322,8 @@ async fn test_streaming_send() {
         .await
         .unwrap();
 
-    assert_eq!(result["count"], json!(110));
+    // Parallel sends: both workers see base count=0, results applied in order
+    assert_eq!(result["count"], json!(100));
 
     let events = collect_events(rx).await;
 

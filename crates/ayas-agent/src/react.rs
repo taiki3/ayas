@@ -10,6 +10,7 @@ use ayas_graph::constants::END;
 use ayas_graph::edge::ConditionalEdge;
 use ayas_graph::node::NodeFn;
 use ayas_graph::state_graph::StateGraph;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
 
 /// Create a ReAct-style agent graph.
@@ -69,7 +70,7 @@ pub fn create_react_agent(
         },
     ))?;
 
-    // Tools node: executes tool calls from the last AI message
+    // Tools node: executes tool calls from the last AI message in parallel
     let tools_map_clone = tools_map.clone();
     graph.add_node(NodeFn::new(
         "tools",
@@ -78,20 +79,26 @@ pub fn create_react_agent(
             async move {
                 let messages = parse_messages(&state["messages"])?;
                 let tool_calls = extract_tool_calls(&messages);
+                let concurrency = tool_calls.len().max(1);
 
-                let mut results: Vec<Value> = Vec::new();
-                for tc in &tool_calls {
-                    let tool = tools_map.get(&tc.name).ok_or_else(|| {
-                        AyasError::Tool(ayas_core::error::ToolError::NotFound(
-                            tc.name.clone(),
-                        ))
-                    })?;
-                    let output = tool.call(tc.arguments.clone()).await?;
-                    let tool_msg = Message::tool(output, &tc.id);
-                    let msg_value = serde_json::to_value(&tool_msg)
-                        .map_err(AyasError::Serialization)?;
-                    results.push(msg_value);
-                }
+                let results: Vec<Value> = stream::iter(tool_calls.into_iter().map(
+                    |tc| {
+                        let tools_map = tools_map.clone();
+                        async move {
+                            let tool = tools_map.get(&tc.name).ok_or_else(|| {
+                                AyasError::Tool(ayas_core::error::ToolError::NotFound(
+                                    tc.name.clone(),
+                                ))
+                            })?;
+                            let output = tool.call(tc.arguments.clone()).await?;
+                            let tool_msg = Message::tool(output, &tc.id);
+                            serde_json::to_value(&tool_msg).map_err(AyasError::Serialization)
+                        }
+                    },
+                ))
+                .buffered(concurrency)
+                .try_collect()
+                .await?;
 
                 Ok(json!({"messages": results}))
             }

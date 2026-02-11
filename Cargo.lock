@@ -530,8 +530,10 @@ name = "ayas-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ayas-checkpoint",
  "ayas-core",
  "ayas-graph",
+ "futures",
  "serde",
  "serde_json",
  "tokio",

@@ -69,6 +69,56 @@ impl ConditionalEdge {
     }
 }
 
+type FanOutRouteFn = dyn Fn(&Value) -> Vec<String> + Send + Sync;
+
+/// A conditional edge that can route to *multiple* target nodes (fan-out).
+///
+/// Unlike `ConditionalEdge` which resolves to a single target, this edge
+/// resolves to zero or more targets that will be executed in parallel.
+pub struct ConditionalFanOutEdge {
+    pub from: String,
+    route_fn: Arc<FanOutRouteFn>,
+    target_map: HashMap<String, String>,
+}
+
+impl ConditionalFanOutEdge {
+    /// Create a new fan-out conditional edge.
+    ///
+    /// - `from`: source node name
+    /// - `route_fn`: function that returns a list of routing keys
+    /// - `target_map`: mapping from routing key to target node name
+    pub fn new<F>(
+        from: impl Into<String>,
+        route_fn: F,
+        target_map: HashMap<String, String>,
+    ) -> Self
+    where
+        F: Fn(&Value) -> Vec<String> + Send + Sync + 'static,
+    {
+        Self {
+            from: from.into(),
+            route_fn: Arc::new(route_fn),
+            target_map,
+        }
+    }
+
+    /// Get the target map.
+    pub fn target_map(&self) -> &HashMap<String, String> {
+        &self.target_map
+    }
+
+    /// Resolve the target node names for the given state.
+    ///
+    /// Returns all targets whose routing keys are present in the target map.
+    /// Unknown keys are silently ignored.
+    pub fn resolve(&self, state: &Value) -> Vec<String> {
+        let keys = (self.route_fn)(state);
+        keys.iter()
+            .filter_map(|k| self.target_map.get(k).cloned())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +176,67 @@ mod tests {
 
         // Key not in map → falls back to the key itself
         assert_eq!(ce.resolve(&json!({})), "unknown_key");
+    }
+
+    #[test]
+    fn fan_out_edge_multiple_targets() {
+        let mut map = HashMap::new();
+        map.insert("research".to_string(), "researcher".to_string());
+        map.insert("coding".to_string(), "coder".to_string());
+        map.insert("review".to_string(), "reviewer".to_string());
+
+        let ce = ConditionalFanOutEdge::new(
+            "router",
+            |_state: &Value| vec!["research".to_string(), "coding".to_string()],
+            map,
+        );
+
+        let targets = ce.resolve(&json!({}));
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains(&"researcher".to_string()));
+        assert!(targets.contains(&"coder".to_string()));
+    }
+
+    #[test]
+    fn fan_out_edge_single_target() {
+        let mut map = HashMap::new();
+        map.insert("only".to_string(), "single_node".to_string());
+
+        let ce = ConditionalFanOutEdge::new(
+            "router",
+            |_state: &Value| vec!["only".to_string()],
+            map,
+        );
+
+        let targets = ce.resolve(&json!({}));
+        assert_eq!(targets, vec!["single_node"]);
+    }
+
+    #[test]
+    fn fan_out_edge_unknown_keys_ignored() {
+        let mut map = HashMap::new();
+        map.insert("known".to_string(), "target".to_string());
+
+        let ce = ConditionalFanOutEdge::new(
+            "router",
+            |_state: &Value| vec!["known".to_string(), "unknown".to_string()],
+            map,
+        );
+
+        let targets = ce.resolve(&json!({}));
+        assert_eq!(targets, vec!["target"]);
+    }
+
+    #[test]
+    fn fan_out_edge_empty_result() {
+        let map = HashMap::new();
+        let ce = ConditionalFanOutEdge::new(
+            "router",
+            |_state: &Value| vec![],
+            map,
+        );
+
+        let targets = ce.resolve(&json!({}));
+        assert!(targets.is_empty());
     }
 }

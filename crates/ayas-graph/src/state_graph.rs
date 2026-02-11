@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::channel::{AggregateOp, ChannelSpec};
 use crate::compiled::CompiledStateGraph;
 use crate::constants::{END, START};
-use crate::edge::{ConditionalEdge, Edge};
+use crate::edge::{ConditionalEdge, ConditionalFanOutEdge, Edge};
 use crate::node::NodeFn;
 
 /// Builder for constructing a state graph.
@@ -19,6 +19,7 @@ pub struct StateGraph {
     nodes: HashMap<String, NodeFn>,
     edges: Vec<Edge>,
     conditional_edges: Vec<ConditionalEdge>,
+    fan_out_edges: Vec<ConditionalFanOutEdge>,
     entry_point: Option<String>,
     finish_points: Vec<String>,
 }
@@ -31,6 +32,7 @@ impl StateGraph {
             nodes: HashMap::new(),
             edges: Vec::new(),
             conditional_edges: Vec::new(),
+            fan_out_edges: Vec::new(),
             entry_point: None,
             finish_points: Vec::new(),
         }
@@ -126,6 +128,12 @@ impl StateGraph {
         self
     }
 
+    /// Add a fan-out conditional edge that can route to multiple targets.
+    pub fn add_conditional_fan_out_edges(&mut self, edge: ConditionalFanOutEdge) -> &mut Self {
+        self.fan_out_edges.push(edge);
+        self
+    }
+
     /// Set the entry point (first node to execute after `START`).
     pub fn set_entry_point(&mut self, node: impl Into<String>) -> &mut Self {
         self.entry_point = Some(node.into());
@@ -171,6 +179,7 @@ impl StateGraph {
             nodes: self.nodes,
             adjacency,
             conditional_edges: self.conditional_edges,
+            fan_out_edges: self.fan_out_edges,
             channel_specs: self.channel_specs,
             entry_point,
             finish_points: self.finish_points,
@@ -201,6 +210,11 @@ impl StateGraph {
         // 4. All conditional edges must reference existing source nodes
         for ce in &self.conditional_edges {
             self.validate_node_ref(&ce.from, "conditional edge source")?;
+        }
+
+        // 4b. All fan-out conditional edges must reference existing source nodes
+        for fe in &self.fan_out_edges {
+            self.validate_node_ref(&fe.from, "fan-out conditional edge source")?;
         }
 
         // 5. All finish points must reference existing nodes
@@ -266,6 +280,13 @@ impl StateGraph {
             };
             for target in targets {
                 adj.entry(ce.from.as_str()).or_default().push(target);
+            }
+        }
+
+        // Fan-out conditional edges: all targets in the map are potentially reachable
+        for fe in &self.fan_out_edges {
+            for target in fe.target_map().values() {
+                adj.entry(fe.from.as_str()).or_default().push(target.as_str());
             }
         }
 

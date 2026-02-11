@@ -14,9 +14,19 @@ type AsyncNodeFn =
 /// A graph node that wraps an async function operating on JSON state.
 ///
 /// Follows the same `Arc<dyn Fn>` pattern as `RunnableLambda`.
+/// Cloning a `NodeFn` is cheap (Arc clone).
 pub struct NodeFn {
     name: String,
     func: Arc<AsyncNodeFn>,
+}
+
+impl Clone for NodeFn {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            func: self.func.clone(),
+        }
+    }
 }
 
 impl NodeFn {

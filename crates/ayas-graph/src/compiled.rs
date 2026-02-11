@@ -8,17 +8,17 @@ use uuid::Uuid;
 use ayas_checkpoint::prelude::{
     extract_command, extract_interrupt_value, extract_sends, is_command, is_interrupt, is_send,
     Checkpoint, CheckpointConfigExt, CheckpointMetadata, CheckpointStore, GraphOutput,
-    INTERRUPT_KEY, SEND_KEY,
+    SendDirective, INTERRUPT_KEY, SEND_KEY,
 };
 use ayas_core::config::RunnableConfig;
-use ayas_core::error::{GraphError, Result};
+use ayas_core::error::{AyasError, GraphError, Result};
 use ayas_core::runnable::Runnable;
 
 use tokio::sync::mpsc;
 
 use crate::channel::{Channel, ChannelSpec};
 use crate::constants::END;
-use crate::edge::ConditionalEdge;
+use crate::edge::{ConditionalEdge, ConditionalFanOutEdge};
 use crate::node::NodeFn;
 use crate::stream::StreamEvent;
 
@@ -38,6 +38,7 @@ pub struct CompiledStateGraph {
     pub(crate) nodes: HashMap<String, NodeFn>,
     pub(crate) adjacency: HashMap<String, Vec<String>>,
     pub(crate) conditional_edges: Vec<ConditionalEdge>,
+    pub(crate) fan_out_edges: Vec<ConditionalFanOutEdge>,
     pub(crate) channel_specs: HashMap<String, ChannelSpec>,
     pub(crate) entry_point: String,
     pub(crate) finish_points: Vec<String>,
@@ -108,7 +109,15 @@ impl CompiledStateGraph {
 
     /// Determine the next nodes to execute after a given node.
     pub(crate) fn next_nodes(&self, current: &str, state: &Value) -> Vec<String> {
-        // Check conditional edges first (they take priority)
+        // Check fan-out conditional edges first (highest priority for multi-target)
+        for fe in &self.fan_out_edges {
+            if fe.from == current {
+                let targets = fe.resolve(state);
+                return targets.into_iter().filter(|t| *t != END).collect();
+            }
+        }
+
+        // Check conditional edges (single target)
         for ce in &self.conditional_edges {
             if ce.from == current {
                 let target = ce.resolve(state);
@@ -129,6 +138,69 @@ impl CompiledStateGraph {
         }
 
         Vec::new()
+    }
+
+    /// Execute send directives in parallel using tokio::task::JoinSet.
+    ///
+    /// All sends receive the same base state snapshot (built from channels before
+    /// sends start), with each send's private input merged on top. Results are
+    /// applied to channels in the original send order for determinism.
+    async fn execute_sends_parallel(
+        nodes: &HashMap<String, NodeFn>,
+        sends: Vec<SendDirective>,
+        channels: &mut HashMap<String, Box<dyn Channel>>,
+        config: &RunnableConfig,
+    ) -> Result<()> {
+        let base_state = Self::build_state(channels);
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for (idx, send) in sends.into_iter().enumerate() {
+            let node_name = send.node;
+            let send_node = nodes
+                .get(&node_name)
+                .ok_or_else(|| {
+                    GraphError::InvalidGraph(format!(
+                        "Send target node '{node_name}' not found"
+                    ))
+                })?
+                .clone();
+
+            let mut send_state = base_state.clone();
+            if let (Value::Object(state_map), Value::Object(input_map)) =
+                (&mut send_state, send.input)
+            {
+                for (k, v) in input_map {
+                    state_map.insert(k, v);
+                }
+            }
+
+            let cfg = config.clone();
+            join_set.spawn(async move {
+                let output = send_node.invoke(send_state, &cfg).await.map_err(|e| {
+                    GraphError::NodeExecution {
+                        node: node_name,
+                        source: Box::new(e),
+                    }
+                })?;
+                Ok::<_, AyasError>((idx, output))
+            });
+        }
+
+        let mut results: Vec<(usize, Value)> = Vec::new();
+        while let Some(res) = join_set.join_next().await {
+            let result = res.map_err(|e| {
+                AyasError::Other(format!("Parallel send task panicked: {e}"))
+            })??;
+            results.push(result);
+        }
+        // Sort by original send index for deterministic channel updates
+        results.sort_by_key(|(idx, _)| *idx);
+
+        for (_, output) in results {
+            Self::update_channels(channels, &output)?;
+        }
+
+        Ok(())
     }
 
     /// Execute the graph like `invoke`, but call `observer` after each node execution.
@@ -219,31 +291,10 @@ impl CompiledStateGraph {
                         }
                         Self::update_channels(&mut channels, &filtered)?;
 
-                        for send in sends {
-                            let send_node =
-                                self.nodes.get(&send.node).ok_or_else(|| {
-                                    GraphError::InvalidGraph(format!(
-                                        "Send target node '{}' not found",
-                                        send.node
-                                    ))
-                                })?;
-                            let mut send_state = Self::build_state(&channels);
-                            if let (Value::Object(state_map), Value::Object(input_map)) =
-                                (&mut send_state, send.input)
-                            {
-                                for (k, v) in input_map {
-                                    state_map.insert(k, v);
-                                }
-                            }
-                            let send_output =
-                                send_node.invoke(send_state, config).await.map_err(|e| {
-                                    GraphError::NodeExecution {
-                                        node: send.node.clone(),
-                                        source: Box::new(e),
-                                    }
-                                })?;
-                            Self::update_channels(&mut channels, &send_output)?;
-                        }
+                        Self::execute_sends_parallel(
+                            &self.nodes, sends, &mut channels, config,
+                        )
+                        .await?;
 
                         let state_after = Self::build_state(&channels);
                         observer(StepInfo {
@@ -397,31 +448,10 @@ impl CompiledStateGraph {
                         }
                         Self::update_channels(&mut channels, &filtered)?;
 
-                        for send in sends {
-                            let send_node =
-                                self.nodes.get(&send.node).ok_or_else(|| {
-                                    GraphError::InvalidGraph(format!(
-                                        "Send target node '{}' not found",
-                                        send.node
-                                    ))
-                                })?;
-                            let mut send_state = Self::build_state(&channels);
-                            if let (Value::Object(state_map), Value::Object(input_map)) =
-                                (&mut send_state, send.input)
-                            {
-                                for (k, v) in input_map {
-                                    state_map.insert(k, v);
-                                }
-                            }
-                            let send_output =
-                                send_node.invoke(send_state, config).await.map_err(|e| {
-                                    GraphError::NodeExecution {
-                                        node: send.node.clone(),
-                                        source: Box::new(e),
-                                    }
-                                })?;
-                            Self::update_channels(&mut channels, &send_output)?;
-                        }
+                        Self::execute_sends_parallel(
+                            &self.nodes, sends, &mut channels, config,
+                        )
+                        .await?;
 
                         let state_after = Self::build_state(&channels);
 
@@ -701,7 +731,7 @@ impl CompiledStateGraph {
                     });
                 }
 
-                // Send: execute send targets sequentially
+                // Send: execute send targets in parallel
                 if is_send(&output) {
                     if let Some(sends) = extract_sends(&output) {
                         let mut filtered = output.clone();
@@ -710,31 +740,10 @@ impl CompiledStateGraph {
                         }
                         Self::update_channels(&mut channels, &filtered)?;
 
-                        for send in sends {
-                            let send_node =
-                                self.nodes.get(&send.node).ok_or_else(|| {
-                                    GraphError::InvalidGraph(format!(
-                                        "Send target node '{}' not found",
-                                        send.node
-                                    ))
-                                })?;
-                            let mut send_state = Self::build_state(&channels);
-                            if let (Value::Object(state_map), Value::Object(input_map)) =
-                                (&mut send_state, send.input)
-                            {
-                                for (k, v) in input_map {
-                                    state_map.insert(k, v);
-                                }
-                            }
-                            let send_output =
-                                send_node.invoke(send_state, config).await.map_err(|e| {
-                                    GraphError::NodeExecution {
-                                        node: send.node.clone(),
-                                        source: Box::new(e),
-                                    }
-                                })?;
-                            Self::update_channels(&mut channels, &send_output)?;
-                        }
+                        Self::execute_sends_parallel(
+                            &self.nodes, sends, &mut channels, config,
+                        )
+                        .await?;
 
                         let state_after = Self::build_state(&channels);
                         let next = self.next_nodes(node_name, &state_after);
@@ -1059,31 +1068,10 @@ impl CompiledStateGraph {
                         }
                         Self::update_channels(&mut channels, &filtered)?;
 
-                        for send in sends {
-                            let send_node =
-                                self.nodes.get(&send.node).ok_or_else(|| {
-                                    GraphError::InvalidGraph(format!(
-                                        "Send target node '{}' not found",
-                                        send.node
-                                    ))
-                                })?;
-                            let mut send_state = Self::build_state(&channels);
-                            if let (Value::Object(state_map), Value::Object(input_map)) =
-                                (&mut send_state, send.input)
-                            {
-                                for (k, v) in input_map {
-                                    state_map.insert(k, v);
-                                }
-                            }
-                            let send_output =
-                                send_node.invoke(send_state, config).await.map_err(|e| {
-                                    GraphError::NodeExecution {
-                                        node: send.node.clone(),
-                                        source: Box::new(e),
-                                    }
-                                })?;
-                            Self::update_channels(&mut channels, &send_output)?;
-                        }
+                        Self::execute_sends_parallel(
+                            &self.nodes, sends, &mut channels, config,
+                        )
+                        .await?;
 
                         let state_after = Self::build_state(&channels);
                         let next = self.next_nodes(node_name, &state_after);
@@ -1268,32 +1256,11 @@ impl Runnable for CompiledStateGraph {
                         }
                         Self::update_channels(&mut channels, &filtered)?;
 
-                        // Execute each send target sequentially
-                        for send in sends {
-                            let send_node =
-                                self.nodes.get(&send.node).ok_or_else(|| {
-                                    GraphError::InvalidGraph(format!(
-                                        "Send target node '{}' not found",
-                                        send.node
-                                    ))
-                                })?;
-                            let mut send_state = Self::build_state(&channels);
-                            if let (Value::Object(state_map), Value::Object(input_map)) =
-                                (&mut send_state, send.input)
-                            {
-                                for (k, v) in input_map {
-                                    state_map.insert(k, v);
-                                }
-                            }
-                            let send_output =
-                                send_node.invoke(send_state, config).await.map_err(|e| {
-                                    GraphError::NodeExecution {
-                                        node: send.node.clone(),
-                                        source: Box::new(e),
-                                    }
-                                })?;
-                            Self::update_channels(&mut channels, &send_output)?;
-                        }
+                        // Execute send targets in parallel
+                        Self::execute_sends_parallel(
+                            &self.nodes, sends, &mut channels, config,
+                        )
+                        .await?;
 
                         // After all sends, determine next nodes from the sender
                         let state_after = Self::build_state(&channels);
@@ -2049,8 +2016,10 @@ mod tests {
         let graph = g.compile().unwrap();
         let config = default_config();
         let result = graph.invoke(json!({}), &config).await.unwrap();
-        // worker_a adds 10 (count: 0→10), worker_b adds 100 (count: 10→110)
-        assert_eq!(result["count"], json!(110));
+        // Parallel sends: both workers see base count=0
+        // worker_a outputs {"count": 10}, worker_b outputs {"count": 100}
+        // Applied in send order: count=10, then count=100 → final 100
+        assert_eq!(result["count"], json!(100));
     }
 
     #[tokio::test]
@@ -2164,5 +2133,116 @@ mod tests {
         let result = graph.invoke(json!({}), &config).await.unwrap();
         assert_eq!(result["status"], json!("dispatched"));
         assert_eq!(result["count"], json!(1));
+    }
+
+    // ---- Fan-Out Conditional Edge tests ----
+
+    use crate::edge::ConditionalFanOutEdge;
+
+    #[tokio::test]
+    async fn test_fan_out_conditional_edge() {
+        // Graph: router → fan-out → [research, coding] → aggregator → END
+        let mut g = StateGraph::new();
+        g.add_channel("log", crate::channel::ChannelSpec::Append);
+
+        g.add_node(NodeFn::new(
+            "router",
+            |_state: Value, _cfg| async move { Ok(json!({"log": "routed"})) },
+        ))
+        .unwrap();
+        g.add_node(NodeFn::new(
+            "research",
+            |_state: Value, _cfg| async move { Ok(json!({"log": "researched"})) },
+        ))
+        .unwrap();
+        g.add_node(NodeFn::new(
+            "coding",
+            |_state: Value, _cfg| async move { Ok(json!({"log": "coded"})) },
+        ))
+        .unwrap();
+        g.add_node(NodeFn::new(
+            "aggregator",
+            |_state: Value, _cfg| async move { Ok(json!({"log": "aggregated"})) },
+        ))
+        .unwrap();
+
+        g.set_entry_point("router");
+
+        let mut target_map = HashMap::new();
+        target_map.insert("research".to_string(), "research".to_string());
+        target_map.insert("coding".to_string(), "coding".to_string());
+
+        g.add_conditional_fan_out_edges(ConditionalFanOutEdge::new(
+            "router",
+            |_state: &Value| vec!["research".to_string(), "coding".to_string()],
+            target_map,
+        ));
+
+        g.add_edge("research", "aggregator");
+        g.add_edge("coding", "aggregator");
+        g.set_finish_point("aggregator");
+
+        let graph = g.compile().unwrap();
+        let config = default_config();
+        let result = graph.invoke(json!({}), &config).await.unwrap();
+
+        let log = result["log"].as_array().unwrap();
+        // router → research & coding (parallel in same super-step) → aggregator
+        // Note: research and coding execute in the same super-step,
+        // aggregator runs once (dedup) in the next step
+        assert!(log.contains(&json!("routed")));
+        assert!(log.contains(&json!("researched")));
+        assert!(log.contains(&json!("coded")));
+        assert!(log.contains(&json!("aggregated")));
+        assert_eq!(log.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_send_parallel_execution_timing() {
+        // Three sends with 100ms sleep each; parallel should complete in < 300ms
+        let mut g = StateGraph::new();
+        g.add_channel("log", crate::channel::ChannelSpec::Append);
+
+        g.add_node(NodeFn::new(
+            "dispatcher",
+            |_state: Value, _cfg| async move {
+                Ok(send_output(vec![
+                    SendDirective::new("worker", json!({"id": "a"})),
+                    SendDirective::new("worker", json!({"id": "b"})),
+                    SendDirective::new("worker", json!({"id": "c"})),
+                ]))
+            },
+        ))
+        .unwrap();
+        g.add_node(NodeFn::new("worker", |state: Value, _cfg| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let id = state["id"].as_str().unwrap_or("?");
+            Ok(json!({"log": format!("done_{id}")}))
+        }))
+        .unwrap();
+
+        g.set_entry_point("dispatcher");
+        g.add_conditional_edges(ConditionalEdge::new(
+            "dispatcher",
+            |_: &Value| END.to_string(),
+            None,
+        ));
+
+        let graph = g.compile().unwrap();
+        let config = default_config();
+
+        let start = std::time::Instant::now();
+        let result = graph.invoke(json!({}), &config).await.unwrap();
+        let elapsed = start.elapsed();
+
+        let log = result["log"].as_array().unwrap();
+        assert_eq!(log.len(), 3);
+
+        // Parallel: 3 × 100ms should complete in < 300ms
+        assert!(
+            elapsed.as_millis() < 300,
+            "Expected parallel send under 300ms, took {}ms",
+            elapsed.as_millis()
+        );
     }
 }

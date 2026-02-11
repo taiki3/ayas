@@ -10,6 +10,7 @@ use ayas_graph::constants::END;
 use ayas_graph::edge::ConditionalEdge;
 use ayas_graph::node::NodeFn;
 use ayas_graph::state_graph::StateGraph;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use serde_json::{json, Value};
 
 /// Create a tool-calling agent graph that uses native tool calls.
@@ -92,7 +93,7 @@ pub fn create_tool_calling_agent(
         },
     ))?;
 
-    // Tools node: executes tool calls from the last AI message
+    // Tools node: executes tool calls from the last AI message in parallel
     let tools_map_clone = tools_map.clone();
     graph.add_node(NodeFn::new(
         "tools",
@@ -101,18 +102,26 @@ pub fn create_tool_calling_agent(
             async move {
                 let messages = parse_messages(&state["messages"])?;
                 let tool_calls = extract_tool_calls(&messages);
+                let concurrency = tool_calls.len().max(1);
 
-                let mut results: Vec<Value> = Vec::new();
-                for tc in &tool_calls {
-                    let tool = tools_map.get(&tc.name).ok_or_else(|| {
-                        AyasError::Tool(ayas_core::error::ToolError::NotFound(tc.name.clone()))
-                    })?;
-                    let output = tool.call(tc.arguments.clone()).await?;
-                    let tool_msg = Message::tool(output, &tc.id);
-                    let msg_value = serde_json::to_value(&tool_msg)
-                        .map_err(AyasError::Serialization)?;
-                    results.push(msg_value);
-                }
+                let results: Vec<Value> = stream::iter(tool_calls.into_iter().map(
+                    |tc| {
+                        let tools_map = tools_map.clone();
+                        async move {
+                            let tool = tools_map.get(&tc.name).ok_or_else(|| {
+                                AyasError::Tool(ayas_core::error::ToolError::NotFound(
+                                    tc.name.clone(),
+                                ))
+                            })?;
+                            let output = tool.call(tc.arguments.clone()).await?;
+                            let tool_msg = Message::tool(output, &tc.id);
+                            serde_json::to_value(&tool_msg).map_err(AyasError::Serialization)
+                        }
+                    },
+                ))
+                .buffered(concurrency)
+                .try_collect()
+                .await?;
 
                 Ok(json!({"messages": results}))
             }
@@ -473,5 +482,94 @@ mod tests {
             ]
         });
         assert!(!last_message_has_tool_calls(&state));
+    }
+
+    /// A mock tool that sleeps for a specified duration then returns.
+    struct SlowMockTool {
+        name: String,
+        delay_ms: u64,
+        result: String,
+    }
+
+    #[async_trait]
+    impl Tool for SlowMockTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.clone(),
+                description: format!("Slow mock tool: {}", self.name),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        async fn call(&self, _input: Value) -> ayas_core::error::Result<String> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            Ok(self.result.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parallel_tool_execution() {
+        // Model calls 3 tools simultaneously, then responds
+        let model = Arc::new(MockChatModel::new(vec![
+            Message::ai_with_tool_calls(
+                "",
+                vec![
+                    ToolCall {
+                        id: "call_1".into(),
+                        name: "slow_a".into(),
+                        arguments: json!({}),
+                    },
+                    ToolCall {
+                        id: "call_2".into(),
+                        name: "slow_b".into(),
+                        arguments: json!({}),
+                    },
+                    ToolCall {
+                        id: "call_3".into(),
+                        name: "slow_c".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            ),
+            Message::ai("All done."),
+        ]));
+
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(SlowMockTool {
+                name: "slow_a".into(),
+                delay_ms: 100,
+                result: "result_a".into(),
+            }),
+            Arc::new(SlowMockTool {
+                name: "slow_b".into(),
+                delay_ms: 100,
+                result: "result_b".into(),
+            }),
+            Arc::new(SlowMockTool {
+                name: "slow_c".into(),
+                delay_ms: 100,
+                result: "result_c".into(),
+            }),
+        ];
+
+        let graph = create_tool_calling_agent(model, tools, None).unwrap();
+        let config = RunnableConfig::default();
+        let input = json!({"messages": [{"type": "user", "content": "Do three things"}]});
+
+        let start = std::time::Instant::now();
+        let result = graph.invoke(input, &config).await.unwrap();
+        let elapsed = start.elapsed();
+
+        let messages = result["messages"].as_array().unwrap();
+        // user -> AI(3 tool calls) -> tool_a -> tool_b -> tool_c -> AI(final)
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[5]["content"], "All done.");
+
+        // Parallel: 3 × 100ms tools should complete in < 300ms
+        assert!(
+            elapsed.as_millis() < 300,
+            "Expected parallel execution under 300ms, took {}ms",
+            elapsed.as_millis()
+        );
     }
 }

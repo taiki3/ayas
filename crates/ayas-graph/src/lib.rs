@@ -20,7 +20,7 @@ pub mod prelude {
     };
     pub use crate::compiled::{CompiledStateGraph, StepInfo};
     pub use crate::constants::{END, START};
-    pub use crate::edge::{ConditionalEdge, Edge};
+    pub use crate::edge::{ConditionalEdge, ConditionalFanOutEdge, Edge};
     pub use crate::node::NodeFn;
     pub use crate::state_graph::StateGraph;
     pub use crate::stream::StreamEvent;

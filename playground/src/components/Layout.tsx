@@ -7,6 +7,7 @@ const TABS = [
   { to: '/agent', label: 'Agent' },
   { to: '/graph', label: 'Graph' },
   { to: '/research', label: 'Research' },
+  { to: '/pipeline', label: 'Pipeline' },
   { to: '/traces', label: 'Traces' },
   { to: '/time-travel', label: 'TimeTravel' },
   { to: '/projects', label: 'Projects' },

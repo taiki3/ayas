@@ -4,6 +4,7 @@ import Chat from './pages/Chat';
 import Agent from './pages/Agent';
 import Graph from './pages/Graph';
 import Research from './pages/Research';
+import Pipeline from './pages/Pipeline';
 import Traces from './pages/Traces';
 import TimeTravel from './pages/TimeTravel';
 import Projects from './pages/Projects';
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="agent" element={<Agent />} />
         <Route path="graph" element={<Graph />} />
         <Route path="research" element={<Research />} />
+        <Route path="pipeline" element={<Pipeline />} />
         <Route path="traces" element={<Traces />} />
         <Route path="time-travel" element={<TimeTravel />} />
         <Route path="projects" element={<Projects />} />

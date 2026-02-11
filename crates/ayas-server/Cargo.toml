@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 meval = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
+tokio-stream = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 ayas-smith = { workspace = true }

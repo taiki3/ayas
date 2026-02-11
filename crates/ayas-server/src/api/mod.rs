@@ -4,6 +4,7 @@ pub mod datasets;
 pub mod feedback;
 pub mod graph;
 pub mod hitl;
+pub mod pipeline;
 pub mod projects;
 pub mod research;
 pub mod runs;
@@ -25,7 +26,8 @@ pub fn api_routes(state: AppState) -> Router {
         .merge(agent::routes())
         .merge(graph::routes())
         .merge(research::routes())
-        .merge(hitl::routes());
+        .merge(hitl::routes())
+        .merge(pipeline::routes());
 
     Router::new()
         .route("/health", get(|| async { "ok" }))

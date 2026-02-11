@@ -392,6 +392,43 @@ export async function listCheckpointSessions(): Promise<CheckpointSession[]> {
   return handleResponse<CheckpointSession[]>(res);
 }
 
+// --- Pipeline API ---
+
+export interface PipelineSseEvent {
+  type: 'step_start' | 'step_complete' | 'hypothesis' | 'complete' | 'error';
+  step?: number;
+  description?: string;
+  summary?: string;
+  index?: number;
+  title?: string;
+  score?: number;
+  step1_text?: string;
+  hypotheses?: unknown;
+  step3_results?: Array<{ title: string; text: string }>;
+  message?: string;
+}
+
+export function pipelineInvokeStream(
+  hypothesisCount: number,
+  onEvent: (event: PipelineSseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const apiKey = getApiKey('gemini');
+  if (!apiKey) {
+    throw new Error('Gemini API key is required for Pipeline. Please configure it in API Keys settings.');
+  }
+  return streamSSE(
+    '/api/pipeline/hypothesis',
+    { hypothesis_count: hypothesisCount },
+    {
+      'Content-Type': 'application/json',
+      'X-Gemini-Key': apiKey,
+    },
+    onEvent,
+    signal,
+  );
+}
+
 // --- Research API ---
 
 export function researchInvokeStream(

@@ -10,7 +10,7 @@ use ayas_core::error::{AyasError, ModelError, Result};
 use ayas_core::message::{
     AIContent, ContentPart, ContentSource, Message, MessageContent, ToolCall, UsageMetadata,
 };
-use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent};
+use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent, ResponseFormat};
 
 use crate::sse::sse_data_stream;
 
@@ -34,6 +34,8 @@ pub struct OpenAIRequest {
     pub stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAIToolDef>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<OpenAIResponseFormat>,
     #[serde(skip_serializing_if = "is_false")]
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +45,22 @@ pub struct OpenAIRequest {
 #[derive(Debug, Serialize)]
 pub struct OpenAIStreamOptions {
     pub include_usage: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIResponseFormat {
+    #[serde(rename = "type")]
+    pub format_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<OpenAIJsonSchema>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenAIJsonSchema {
+    pub name: String,
+    pub schema: serde_json::Value,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,6 +305,26 @@ impl OpenAIChatModel {
             )
         };
 
+        let response_format = match &options.response_format {
+            Some(ResponseFormat::JsonObject) => Some(OpenAIResponseFormat {
+                format_type: "json_object".into(),
+                json_schema: None,
+            }),
+            Some(ResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            }) => Some(OpenAIResponseFormat {
+                format_type: "json_schema".into(),
+                json_schema: Some(OpenAIJsonSchema {
+                    name: name.clone(),
+                    schema: schema.clone(),
+                    strict: *strict,
+                }),
+            }),
+            Some(ResponseFormat::Text) | None => None,
+        };
+
         OpenAIRequest {
             model: self.model_id.clone(),
             messages: api_messages,
@@ -298,6 +336,7 @@ impl OpenAIChatModel {
                 Some(options.stop.clone())
             },
             tools,
+            response_format,
             stream: false,
             stream_options: None,
         }
@@ -730,6 +769,65 @@ mod tests {
         assert!(req.stream_options.is_none());
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Structured output tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_request_json_object() {
+        let model = make_model();
+        let messages = vec![Message::user("Return JSON")];
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        let rf = req.response_format.unwrap();
+        assert_eq!(rf.format_type, "json_object");
+        assert!(rf.json_schema.is_none());
+    }
+
+    #[test]
+    fn build_request_json_schema() {
+        let model = make_model();
+        let messages = vec![Message::user("Extract info")];
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonSchema {
+                name: "person".into(),
+                schema: schema.clone(),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        let rf = req.response_format.unwrap();
+        assert_eq!(rf.format_type, "json_schema");
+        let js = rf.json_schema.unwrap();
+        assert_eq!(js.name, "person");
+        assert_eq!(js.schema, schema);
+        assert!(js.strict);
+    }
+
+    #[test]
+    fn build_request_text_format_omits_response_format() {
+        let model = make_model();
+        let messages = vec![Message::user("Hello")];
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::Text),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        assert!(req.response_format.is_none());
     }
 
     // -----------------------------------------------------------------------

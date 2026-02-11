@@ -7,6 +7,28 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::message::{Message, UsageMetadata};
 
+fn default_true() -> bool {
+    true
+}
+
+/// Desired response format for structured output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Free-form text (default, equivalent to omitting the field).
+    Text,
+    /// Force JSON output (no schema).
+    JsonObject,
+    /// Force JSON output conforming to a schema.
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+        /// OpenAI strict mode (default true).
+        #[serde(default = "default_true")]
+        strict: bool,
+    },
+}
+
 /// Options controlling a ChatModel invocation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CallOptions {
@@ -25,6 +47,10 @@ pub struct CallOptions {
     /// Stop sequences.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
+
+    /// Structured output format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 /// Result of a chat model generation.

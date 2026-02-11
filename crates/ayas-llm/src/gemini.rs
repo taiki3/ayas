@@ -8,7 +8,7 @@ use ayas_core::error::{AyasError, ModelError, Result};
 use ayas_core::message::{
     AIContent, ContentPart, ContentSource, Message, MessageContent, ToolCall, UsageMetadata,
 };
-use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent};
+use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent, ResponseFormat};
 
 use crate::sse::sse_data_stream;
 
@@ -80,6 +80,7 @@ pub struct GeminiFunctionDeclaration {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
@@ -87,6 +88,10 @@ pub struct GenerationConfig {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_json_schema: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,9 +251,19 @@ impl GeminiChatModel {
             }
         }
 
+        let (response_mime_type, response_json_schema) = match &options.response_format {
+            Some(ResponseFormat::JsonObject) => (Some("application/json".into()), None),
+            Some(ResponseFormat::JsonSchema { schema, .. }) => {
+                (Some("application/json".into()), Some(schema.clone()))
+            }
+            Some(ResponseFormat::Text) | None => (None, None),
+        };
+
+        let has_response_format = response_mime_type.is_some();
         let generation_config = if options.max_tokens.is_some()
             || options.temperature.is_some()
             || !options.stop.is_empty()
+            || has_response_format
         {
             Some(GenerationConfig {
                 max_output_tokens: options.max_tokens,
@@ -258,6 +273,8 @@ impl GeminiChatModel {
                 } else {
                     Some(options.stop.clone())
                 },
+                response_mime_type,
+                response_json_schema,
             })
         } else {
             None
@@ -644,6 +661,63 @@ mod tests {
             .and_then(|p| p.text.clone())
             .unwrap_or_default();
         assert_eq!(text, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Structured output tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_request_json_object() {
+        let model = make_model();
+        let messages = vec![Message::user("Return JSON")];
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        let config = req.generation_config.unwrap();
+        assert_eq!(config.response_mime_type.as_deref(), Some("application/json"));
+        assert!(config.response_json_schema.is_none());
+    }
+
+    #[test]
+    fn build_request_json_schema() {
+        let model = make_model();
+        let messages = vec![Message::user("Extract info")];
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonSchema {
+                name: "person".into(),
+                schema: schema.clone(),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        let config = req.generation_config.unwrap();
+        assert_eq!(config.response_mime_type.as_deref(), Some("application/json"));
+        assert_eq!(config.response_json_schema.unwrap(), schema);
+    }
+
+    #[test]
+    fn build_request_text_format_no_generation_config() {
+        let model = make_model();
+        let messages = vec![Message::user("Hello")];
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::Text),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        // Text format should not force generation_config
+        assert!(req.generation_config.is_none());
     }
 
     // -----------------------------------------------------------------------

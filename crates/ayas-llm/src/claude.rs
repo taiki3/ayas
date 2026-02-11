@@ -10,7 +10,7 @@ use ayas_core::error::{AyasError, ModelError, Result};
 use ayas_core::message::{
     AIContent, ContentPart, ContentSource, Message, MessageContent, ToolCall, UsageMetadata,
 };
-use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent};
+use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent, ResponseFormat};
 
 use crate::sse::sse_data_stream;
 
@@ -20,6 +20,14 @@ use crate::sse::sse_data_stream;
 
 fn is_false(v: &bool) -> bool {
     !*v
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicToolChoice {
+    Auto,
+    Any,
+    Tool { name: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +43,8 @@ pub struct AnthropicRequest {
     pub stop_sequences: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicToolDef>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "is_false")]
     pub stream: bool,
 }
@@ -264,21 +274,41 @@ impl ClaudeChatModel {
             }
         }
 
-        let tools = if options.tools.is_empty() {
-            None
-        } else {
-            Some(
-                options
-                    .tools
-                    .iter()
-                    .map(|t| AnthropicToolDef {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        input_schema: t.parameters.clone(),
-                    })
-                    .collect(),
-            )
-        };
+        let mut tools: Vec<AnthropicToolDef> = options
+            .tools
+            .iter()
+            .map(|t| AnthropicToolDef {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.parameters.clone(),
+            })
+            .collect();
+
+        let mut tool_choice: Option<AnthropicToolChoice> = None;
+
+        // Handle response_format via tool_choice pattern
+        match &options.response_format {
+            Some(ResponseFormat::JsonObject) => {
+                // Append instruction to system prompt
+                let suffix = "\n\nAlways respond in valid JSON.";
+                system = Some(match system {
+                    Some(s) => format!("{s}{suffix}"),
+                    None => suffix.trim_start().to_string(),
+                });
+            }
+            Some(ResponseFormat::JsonSchema { name, schema, .. }) => {
+                // Inject a synthetic tool and force its use
+                tools.push(AnthropicToolDef {
+                    name: name.clone(),
+                    description: "Structured output".into(),
+                    input_schema: schema.clone(),
+                });
+                tool_choice = Some(AnthropicToolChoice::Tool { name: name.clone() });
+            }
+            Some(ResponseFormat::Text) | None => {}
+        }
+
+        let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
         AnthropicRequest {
             model: self.model_id.clone(),
@@ -291,7 +321,8 @@ impl ClaudeChatModel {
             } else {
                 Some(options.stop.clone())
             },
-            tools,
+            tools: tools_opt,
+            tool_choice,
             stream: false,
         }
     }
@@ -300,6 +331,10 @@ impl ClaudeChatModel {
 #[async_trait]
 impl ChatModel for ClaudeChatModel {
     async fn generate(&self, messages: &[Message], options: &CallOptions) -> Result<ChatResult> {
+        let is_structured = matches!(
+            options.response_format,
+            Some(ResponseFormat::JsonSchema { .. })
+        );
         let request_body = self.build_request(messages, options);
 
         let response = self
@@ -344,11 +379,16 @@ impl ChatModel for ClaudeChatModel {
                     text_parts.push(text.clone());
                 }
                 AnthropicResponseContent::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: input.clone(),
-                    });
+                    if is_structured {
+                        // Convert tool_use input to text content for structured output
+                        text_parts.push(serde_json::to_string(input).unwrap_or_default());
+                    } else {
+                        tool_calls.push(ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: input.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -785,6 +825,103 @@ mod tests {
         // stream: false should be omitted in JSON
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Structured output tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_request_json_object() {
+        let model = make_model();
+        let messages = vec![Message::user("Return JSON")];
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        // Should append JSON instruction to system prompt
+        assert!(req.system.as_deref().unwrap().contains("Always respond in valid JSON."));
+        // No tool_choice for JsonObject
+        assert!(req.tool_choice.is_none());
+    }
+
+    #[test]
+    fn build_request_json_object_appends_to_existing_system() {
+        let model = make_model();
+        let messages = vec![
+            Message::system("You are helpful"),
+            Message::user("Return JSON"),
+        ];
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        let sys = req.system.as_deref().unwrap();
+        assert!(sys.starts_with("You are helpful"));
+        assert!(sys.contains("Always respond in valid JSON."));
+    }
+
+    #[test]
+    fn build_request_json_schema() {
+        let model = make_model();
+        let messages = vec![Message::user("Extract info")];
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+        let options = CallOptions {
+            response_format: Some(ayas_core::model::ResponseFormat::JsonSchema {
+                name: "person".into(),
+                schema: schema.clone(),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+
+        // Should have a synthetic tool injected
+        let tools = req.tools.unwrap();
+        let synthetic = tools.iter().find(|t| t.name == "person").unwrap();
+        assert_eq!(synthetic.description, "Structured output");
+        assert_eq!(synthetic.input_schema, schema);
+
+        // tool_choice should force the synthetic tool
+        match &req.tool_choice {
+            Some(AnthropicToolChoice::Tool { name }) => assert_eq!(name, "person"),
+            other => panic!("expected Tool choice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_request_json_schema_with_existing_tools() {
+        let model = make_model();
+        let messages = vec![Message::user("Extract info")];
+        let schema = serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}});
+        let options = CallOptions {
+            tools: vec![ToolDefinition {
+                name: "calculator".into(),
+                description: "Calculate math".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            response_format: Some(ayas_core::model::ResponseFormat::JsonSchema {
+                name: "person".into(),
+                schema,
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let req = model.build_request(&messages, &options);
+        let tools = req.tools.unwrap();
+        // Should have both the user tool and the synthetic tool
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "calculator");
+        assert_eq!(tools[1].name, "person");
     }
 
     // -----------------------------------------------------------------------

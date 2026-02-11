@@ -395,16 +395,16 @@ export async function listCheckpointSessions(): Promise<CheckpointSession[]> {
 // --- Pipeline API ---
 
 export interface PipelineSseEvent {
-  type: 'step_start' | 'step_complete' | 'hypothesis' | 'complete' | 'error';
+  type: 'step_start' | 'step_complete' | 'hypothesis' | 'step3_start' | 'step3_complete' | 'step3_error' | 'complete' | 'error';
   step?: number;
   description?: string;
   summary?: string;
   index?: number;
   title?: string;
   score?: number;
+  text?: string;
   step1_text?: string;
   hypotheses?: unknown;
-  step3_results?: Array<{ title: string; text: string }>;
   message?: string;
 }
 

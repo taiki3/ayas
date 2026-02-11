@@ -10,7 +10,9 @@ interface HypothesisCard {
 
 interface Step3Report {
   title: string;
-  text: string;
+  text: string | null;
+  error: string | null;
+  loading: boolean;
 }
 
 export default function Pipeline() {
@@ -77,9 +79,35 @@ export default function Pipeline() {
                 ]);
               }
               break;
+            case 'step3_start':
+              if (event.index != null && event.title) {
+                setStep3Results((prev) => {
+                  const next = [...prev];
+                  next[event.index!] = { title: event.title!, text: null, error: null, loading: true };
+                  return next;
+                });
+              }
+              break;
+            case 'step3_complete':
+              if (event.index != null) {
+                setStep3Results((prev) => {
+                  const next = [...prev];
+                  next[event.index!] = { title: event.title ?? '', text: event.text ?? '', error: null, loading: false };
+                  return next;
+                });
+              }
+              break;
+            case 'step3_error':
+              if (event.index != null) {
+                setStep3Results((prev) => {
+                  const next = [...prev];
+                  next[event.index!] = { title: event.title ?? '', text: null, error: event.message ?? 'Unknown error', loading: false };
+                  return next;
+                });
+              }
+              break;
             case 'complete':
               setStep1Text(event.step1_text ?? null);
-              setStep3Results(event.step3_results ?? []);
               setDone(true);
               setCurrentStep(null);
               setStepDescription(null);
@@ -270,19 +298,27 @@ export default function Pipeline() {
           <div className="space-y-3">
             <h3 className="text-sm font-semibold text-gray-700">STEP 3: 深掘りレポート</h3>
             {step3Results.map((r, i) => (
-              <div key={i} className="border border-gray-200 rounded-lg bg-white">
+              <div key={i} className={`border rounded-lg bg-white ${r.error ? 'border-red-200' : 'border-gray-200'}`}>
                 <button
-                  onClick={() => toggleStep3(i)}
-                  className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  onClick={() => !r.loading && toggleStep3(i)}
+                  className={`w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-gray-50 ${r.loading ? 'cursor-default' : ''} ${r.error ? 'text-red-700' : 'text-gray-700'}`}
                 >
-                  <span className="truncate">
+                  <span className="truncate flex items-center gap-2">
                     [{i + 1}] {r.title}
+                    {r.loading && (
+                      <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                    )}
                   </span>
                   <span className="text-gray-400 shrink-0 ml-2">
-                    {step3Open.has(i) ? '\u25B2' : '\u25BC'}
+                    {r.loading ? '' : r.error ? '\u2717' : step3Open.has(i) ? '\u25B2' : '\u25BC'}
                   </span>
                 </button>
-                {step3Open.has(i) && (
+                {r.error && (
+                  <div className="px-4 pb-3 text-xs text-red-600 border-t border-red-100">
+                    Error: {r.error}
+                  </div>
+                )}
+                {!r.loading && r.text && step3Open.has(i) && (
                   <div className="px-6 pb-6 prose prose-sm max-w-none text-gray-800 border-t border-gray-100">
                     <Markdown>{r.text}</Markdown>
                   </div>

@@ -157,6 +157,8 @@
 ### 残項目
 - [ ] APIキー管理
 - [ ] アノテーションAPI
+- [ ] **Pipeline: Deep Research リトライ機構** — Gemini Interactions API は HTTP 500 を頻繁に返す。STEP 3 並列実行時に一部のみ失敗するケースが多いため、Exponential backoff (1s→2s→4s, 最大3回) のリトライが必要。429は `retry_after_secs` を尊重。対象: `ayas-deep-research/src/runnable.rs` にリトライラッパー追加、`pipeline.rs` でリトライ進捗SSE通知
+- [ ] **File Search 対応** — 現在 `demo/` ファイルを `include_str!` / `fs::read_to_string` でインライン添付しているが、Gemini File Search（ベクトルストア）API 利用可能時にファイルアップロード→ベクトルストア作成→File Search tool 設定に置き換え
 
 ---
 

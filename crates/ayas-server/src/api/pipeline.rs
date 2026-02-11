@@ -1,3 +1,7 @@
+// TODO: File Search対応 — 現在はinclude_str!で埋め込んだdemoファイルをインラインテキスト添付で
+//       Deep Researchに渡している。Gemini File Search（ベクトルストア）APIが利用可能になったら、
+//       ファイルアップロード→ベクトルストア作成→File Search tool設定に置き換えること。
+
 use std::sync::Arc;
 
 use axum::response::sse::Event;

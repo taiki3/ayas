@@ -5,6 +5,11 @@
 //! STEP 3: Parallel Deep Research per hypothesis → detailed reports
 //!
 //! Usage: GEMINI_API_KEY=xxx cargo run --example hypothesis_pipeline
+//!
+//! TODO: File Search対応 — 現在はプロンプト内のファイル参照（target_specification.txt /
+//!       technical_assets.json / hypothesis_context）をインラインテキスト添付で代替している。
+//!       Gemini File Search（ベクトルストア）APIが利用可能になったら、ファイルアップロード→
+//!       ベクトルストア作成→File Search tool設定に置き換えること。
 
 use std::sync::Arc;
 

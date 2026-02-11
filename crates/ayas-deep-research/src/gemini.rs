@@ -41,11 +41,11 @@ impl GeminiInteractionsClient {
     }
 
     fn interactions_url(&self) -> String {
-        format!("{}/interactions", self.base_url)
+        format!("{}/interactions?key={}", self.base_url, self.api_key)
     }
 
     fn interaction_url(&self, id: &str) -> String {
-        format!("{}/interactions/{}", self.base_url, id)
+        format!("{}/interactions/{}?key={}", self.base_url, id, self.api_key)
     }
 
     fn map_status_error(status: StatusCode, body: String) -> AyasError {
@@ -68,7 +68,6 @@ impl InteractionsClient for GeminiInteractionsClient {
         let response = self
             .client
             .post(self.interactions_url())
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .json(request)
             .send()
             .await
@@ -93,7 +92,6 @@ impl InteractionsClient for GeminiInteractionsClient {
         let response = self
             .client
             .get(self.interaction_url(interaction_id))
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
             .map_err(|e| AyasError::Model(ModelError::ApiRequest(e.to_string())))?;
@@ -295,11 +293,11 @@ mod tests {
             GeminiInteractionsClient::with_base_url("key", "http://localhost:8080/v1");
         assert_eq!(
             client.interactions_url(),
-            "http://localhost:8080/v1/interactions"
+            "http://localhost:8080/v1/interactions?key=key"
         );
         assert_eq!(
             client.interaction_url("abc"),
-            "http://localhost:8080/v1/interactions/abc"
+            "http://localhost:8080/v1/interactions/abc?key=key"
         );
     }
 }

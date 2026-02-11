@@ -1,0 +1,32 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    environment:
+      - PORT=3001
+      - AYAS_SMITH_DIR=/data/smith
+    volumes:
+      - smith-data:/data/smith
+    expose:
+      - "3001"
+
+  playground:
+    build:
+      context: ./playground
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    ports:
+      - "13000:80"
+    depends_on:
+      - server
+
+volumes:
+  smith-data:

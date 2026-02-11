@@ -3,25 +3,29 @@ use axum::{Json, Router, routing::{get, post}};
 use uuid::Uuid;
 
 use ayas_smith::client::flush_runs;
+use ayas_smith::duckdb_store::DuckDbStore;
 use ayas_smith::query::SmithQuery;
+use ayas_smith::store::SmithStore;
 use ayas_smith::types::RunFilter;
 
 use crate::error::AppError;
 use crate::run_types::{
-    BatchIngestRequest, BatchIngestResponse, ProjectQuery, RunDto, RunFilterRequest, RunSummary,
-    StatsResponse,
+    BatchIngestRequest, BatchIngestResponse, BatchRunRequest, BatchRunResponse, ProjectQuery,
+    RunDto, RunFilterRequest, RunSummary, StatsResponse,
 };
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/runs/batch", post(batch_ingest))
+        .route("/runs/batch/v2", post(batch_run))
         .route("/runs/query", post(query_runs))
         .route("/runs/stats", get(get_stats))
         .route("/runs/{id}", get(get_run))
         .route("/runs/trace/{trace_id}", get(get_trace))
 }
 
+/// Legacy batch ingest (POST only, backward compatible).
 async fn batch_ingest(
     State(state): State<AppState>,
     Json(req): Json<BatchIngestRequest>,
@@ -49,6 +53,50 @@ async fn batch_ingest(
     }
 
     Ok(Json(BatchIngestResponse { ingested: count }))
+}
+
+/// New batch endpoint: POST new runs + PATCH existing runs.
+async fn batch_run(
+    State(state): State<AppState>,
+    Json(req): Json<BatchRunRequest>,
+) -> Result<Json<BatchRunResponse>, AppError> {
+    let base_dir = state.smith_base_dir.clone();
+    let posted = req.post.len();
+    let patched = req.patch.len();
+
+    // Handle POSTs
+    if !req.post.is_empty() {
+        let runs: Vec<ayas_smith::types::Run> =
+            req.post.into_iter().map(|dto| dto.into()).collect();
+
+        let mut by_project: std::collections::HashMap<String, Vec<ayas_smith::types::Run>> =
+            std::collections::HashMap::new();
+        for run in runs {
+            by_project
+                .entry(run.project.clone())
+                .or_default()
+                .push(run);
+        }
+
+        for (project, runs) in &by_project {
+            flush_runs(runs, &base_dir, project)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+        }
+    }
+
+    // Handle PATCHes
+    if !req.patch.is_empty() {
+        let store = DuckDbStore::new(&base_dir);
+        for patch_req in &req.patch {
+            let patch = ayas_smith::types::RunPatch::from(patch_req);
+            store
+                .patch_run(patch_req.run_id, &patch_req.project, &patch)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+        }
+    }
+
+    Ok(Json(BatchRunResponse { posted, patched }))
 }
 
 async fn query_runs(
@@ -222,6 +270,74 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let result: BatchIngestResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result.ingested, 0);
+    }
+
+    #[tokio::test]
+    async fn batch_run_post_and_patch() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // First, create a Running run via POST
+        let run_id = Uuid::new_v4();
+        let post_body = serde_json::json!({
+            "post": [{
+                "run_id": run_id,
+                "name": "my-chain",
+                "run_type": "chain",
+                "project": "test-proj",
+                "status": "running",
+                "input": "{\"q\": \"hello\"}"
+            }],
+            "patch": []
+        });
+
+        let app = test_app(dir.path());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/runs/batch/v2")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&post_body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let result: BatchRunResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result.posted, 1);
+        assert_eq!(result.patched, 0);
+
+        // Now PATCH the run to complete it
+        let patch_body = serde_json::json!({
+            "post": [],
+            "patch": [{
+                "run_id": run_id,
+                "project": "test-proj",
+                "status": "success",
+                "output": "{\"answer\": \"world\"}"
+            }]
+        });
+
+        let app = test_app(dir.path());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/runs/batch/v2")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&patch_body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let result: BatchRunResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result.posted, 0);
+        assert_eq!(result.patched, 1);
+
+        // Verify the run was patched
+        let query = SmithQuery::new(dir.path()).unwrap();
+        let run = query.get_run(run_id, "test-proj").unwrap().unwrap();
+        assert_eq!(run.status, ayas_smith::types::RunStatus::Success);
+        assert_eq!(run.output.as_deref(), Some("{\"answer\": \"world\"}"));
     }
 
     #[tokio::test]

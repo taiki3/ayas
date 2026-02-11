@@ -842,6 +842,142 @@ impl CompiledStateGraph {
         Ok(GraphOutput::Complete(Self::build_state(&channels)))
     }
 
+    /// Execute the graph with multi-mode streaming.
+    ///
+    /// Emits [`CoreStreamEvent`] events filtered by the requested [`StreamMode`]s.
+    /// Terminal events (`GraphComplete`, `Error`) are always emitted regardless
+    /// of the requested modes.
+    ///
+    /// Multiple modes can be active simultaneously (e.g. `[Values, Debug]`).
+    pub async fn stream_with_modes(
+        &self,
+        input: Value,
+        config: &RunnableConfig,
+        modes: &[ayas_core::stream::StreamMode],
+        tx: mpsc::Sender<ayas_core::stream::StreamEvent>,
+    ) -> Result<Value> {
+        use ayas_core::stream::{StreamEvent as CoreEvent, StreamMode};
+
+        let has = |m: StreamMode| modes.contains(&m);
+
+        let mut channels: HashMap<String, Box<dyn Channel>> = self
+            .channel_specs
+            .iter()
+            .map(|(k, spec)| (k.clone(), spec.create()))
+            .collect();
+
+        if let Value::Object(map) = &input {
+            for (key, value) in map {
+                if let Some(ch) = channels.get_mut(key) {
+                    ch.update(vec![value.clone()])?;
+                }
+            }
+        }
+
+        let mut current_nodes = vec![self.entry_point.clone()];
+        let mut step = 0;
+        let mut node_step = 0;
+
+        while !current_nodes.is_empty() {
+            if step >= config.recursion_limit {
+                let err = GraphError::RecursionLimit {
+                    limit: config.recursion_limit,
+                };
+                let _ = tx.send(CoreEvent::Error { message: err.to_string() }).await;
+                return Err(err.into());
+            }
+
+            let mut all_next: Vec<String> = Vec::new();
+
+            for node_name in &current_nodes {
+                if has(StreamMode::Debug) {
+                    let _ = tx.send(CoreEvent::Debug {
+                        event_type: "node_start".into(),
+                        payload: serde_json::json!({
+                            "node": node_name,
+                            "step": node_step,
+                        }),
+                    }).await;
+                }
+
+                let state = Self::build_state(&channels);
+
+                let node = self.nodes.get(node_name).ok_or_else(|| {
+                    GraphError::InvalidGraph(format!(
+                        "Node '{node_name}' not found during execution"
+                    ))
+                })?;
+
+                let output = node.invoke(state.clone(), config).await.map_err(|e| {
+                    GraphError::NodeExecution {
+                        node: node_name.clone(),
+                        source: Box::new(e),
+                    }
+                })?;
+
+                // Normal flow (command/send/interrupt handling omitted for
+                // simplicity in this streaming method; use
+                // invoke_with_streaming for the full feature set)
+                Self::update_channels(&mut channels, &output)?;
+
+                let state_after = Self::build_state(&channels);
+
+                if has(StreamMode::Updates) {
+                    let _ = tx.send(CoreEvent::Updates {
+                        node: node_name.clone(),
+                        data: output.clone(),
+                    }).await;
+                }
+
+                if has(StreamMode::Values) {
+                    let _ = tx.send(CoreEvent::Values {
+                        state: state_after.clone(),
+                    }).await;
+                }
+
+                if has(StreamMode::Debug) {
+                    let _ = tx.send(CoreEvent::Debug {
+                        event_type: "node_end".into(),
+                        payload: serde_json::json!({
+                            "node": node_name,
+                            "step": node_step,
+                        }),
+                    }).await;
+                }
+
+                let next = self.next_nodes(node_name, &state_after);
+                all_next.extend(next);
+                node_step += 1;
+
+                if has(StreamMode::Debug) && !all_next.is_empty() {
+                    let _ = tx.send(CoreEvent::Debug {
+                        event_type: "edge_transition".into(),
+                        payload: serde_json::json!({
+                            "from": node_name,
+                            "to": &all_next,
+                        }),
+                    }).await;
+                }
+            }
+
+            all_next.sort();
+            all_next.dedup();
+
+            for ch in channels.values_mut() {
+                ch.on_step_end();
+            }
+
+            current_nodes = all_next;
+            step += 1;
+        }
+
+        let final_state = Self::build_state(&channels);
+        let _ = tx.send(CoreEvent::GraphComplete {
+            output: final_state.clone(),
+        }).await;
+        Ok(final_state)
+    }
+
     /// Like `invoke_resumable`, but emits structured [`StreamEvent`]s via a
     /// tokio mpsc channel instead of using an observer callback.
     pub async fn invoke_resumable_with_streaming(

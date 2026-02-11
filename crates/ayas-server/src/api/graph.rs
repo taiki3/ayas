@@ -23,7 +23,8 @@ use crate::sse::{sse_done, sse_event};
 use crate::tracing_middleware::{TracingContext, is_tracing_requested};
 use crate::types::{
     GraphChannelDto, GraphEdgeDto, GraphExecuteRequest, GraphGenerateRequest,
-    GraphGenerateResponse, GraphNodeDto, GraphValidateRequest, GraphValidateResponse,
+    GraphGenerateResponse, GraphNodeDto, GraphStreamRequest, GraphValidateRequest,
+    GraphValidateResponse,
 };
 
 /// Factory function type for creating ChatModel instances.
@@ -44,6 +45,7 @@ pub fn routes_with_factory(factory: GraphModelFactory) -> Router {
         .route("/graph/validate", post(graph_validate))
         .route("/graph/execute", post(graph_execute))
         .route("/graph/invoke-stream", post(graph_invoke_stream))
+        .route("/graph/stream", post(graph_stream))
         .route("/graph/generate", post(graph_generate))
         .with_state(factory)
 }
@@ -213,6 +215,52 @@ async fn graph_invoke_stream(
             }
         }
 
+        yield sse_done();
+    };
+
+    Ok(Sse::new(stream))
+}
+
+/// Multi-mode streaming endpoint.
+///
+/// The request body includes `stream_mode` (comma-separated), e.g. `"values,debug"`.
+/// SSE events use the `event:` field to indicate the stream mode.
+async fn graph_stream(
+    Json(req): Json<GraphStreamRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    use ayas_core::stream::{StreamEvent as CoreEvent, parse_stream_modes};
+
+    let modes = parse_stream_modes(req.stream_mode.as_deref().unwrap_or(""))
+        .map_err(|e| AppError::BadRequest(e))?;
+
+    let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
+    let config = RunnableConfig::default();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<CoreEvent>(64);
+
+    let modes_clone = modes.clone();
+    tokio::spawn(async move {
+        let _ = compiled
+            .stream_with_modes(req.input, &config, &modes_clone, tx)
+            .await;
+    });
+
+    let stream = async_stream::stream! {
+        while let Some(event) = rx.recv().await {
+            let mode_name = match &event {
+                CoreEvent::Values { .. } => "values",
+                CoreEvent::Updates { .. } => "updates",
+                CoreEvent::Message { .. } => "messages",
+                CoreEvent::Debug { .. } => "debug",
+                CoreEvent::GraphComplete { .. } => "complete",
+                CoreEvent::Error { .. } => "error",
+            };
+
+            let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
+            yield Ok::<_, std::convert::Infallible>(
+                Event::default().event(mode_name).data(json)
+            );
+        }
         yield sse_done();
     };
 

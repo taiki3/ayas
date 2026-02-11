@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "LangSmith-style tracing and observability for Ayas"
 
+[features]
+default = []
+postgres = ["tokio-postgres"]
+clickhouse = ["reqwest"]
+
 [dependencies]
 ayas-core = { workspace = true }
 async-trait = { workspace = true }
@@ -19,6 +24,11 @@ arrow = { workspace = true, features = ["chrono-tz"] }
 parquet = { workspace = true, features = ["arrow", "zstd"] }
 duckdb = { workspace = true }
 dirs = { workspace = true }
+flume = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-chrono-0_4", "with-uuid-1"] }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

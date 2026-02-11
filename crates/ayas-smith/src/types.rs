@@ -50,6 +50,7 @@ impl std::str::FromStr for RunType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
+    Running,
     Success,
     Error,
 }
@@ -57,6 +58,7 @@ pub enum RunStatus {
 impl RunStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Running => "running",
             Self::Success => "success",
             Self::Error => "error",
         }
@@ -74,6 +76,7 @@ impl std::str::FromStr for RunStatus {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
+            "running" => Ok(Self::Running),
             "success" => Ok(Self::Success),
             "error" => Ok(Self::Error),
             other => Err(format!("unknown run status: '{other}'")),
@@ -102,6 +105,9 @@ pub struct Run {
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
     pub latency_ms: Option<i64>,
+    /// Hierarchical ordering key: `{timestamp}.{run_id_prefix}` segments
+    /// joined by `.` to represent the execution tree.
+    pub dotted_order: Option<String>,
 }
 
 impl Run {
@@ -119,6 +125,7 @@ impl Run {
             input: "{}".into(),
             tags: Vec::new(),
             metadata: "{}".into(),
+            dotted_order: None,
         }
     }
 }
@@ -135,6 +142,7 @@ pub struct RunBuilder {
     input: String,
     tags: Vec<String>,
     metadata: String,
+    dotted_order: Option<String>,
 }
 
 impl RunBuilder {
@@ -178,6 +186,37 @@ impl RunBuilder {
         self
     }
 
+    pub fn dotted_order(mut self, order: impl Into<String>) -> Self {
+        self.dotted_order = Some(order.into());
+        self
+    }
+
+    /// Start the run with status Running (no end_time, no output).
+    /// Used for the 2-phase lifecycle: start() then patch with end_time/status.
+    pub fn start(self) -> Run {
+        Run {
+            run_id: self.run_id,
+            parent_run_id: self.parent_run_id,
+            trace_id: self.trace_id,
+            name: self.name,
+            run_type: self.run_type,
+            project: self.project,
+            start_time: self.start_time,
+            end_time: None,
+            status: RunStatus::Running,
+            input: self.input,
+            output: None,
+            error: None,
+            tags: self.tags,
+            metadata: self.metadata,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            latency_ms: None,
+            dotted_order: self.dotted_order,
+        }
+    }
+
     /// Finish the run with a successful result.
     pub fn finish_ok(self, output: impl Into<String>) -> Run {
         let end_time = Utc::now();
@@ -201,6 +240,7 @@ impl RunBuilder {
             output_tokens: None,
             total_tokens: None,
             latency_ms: Some(latency_ms),
+            dotted_order: self.dotted_order,
         }
     }
 
@@ -227,6 +267,7 @@ impl RunBuilder {
             output_tokens: None,
             total_tokens: None,
             latency_ms: Some(latency_ms),
+            dotted_order: self.dotted_order,
         }
     }
 
@@ -280,6 +321,116 @@ pub struct RunFilter {
     pub offset: Option<usize>,
 }
 
+/// A feedback entry associated with a run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Feedback {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub key: String,
+    pub score: f64,
+    #[serde(default)]
+    pub comment: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Filter criteria for querying feedback.
+#[derive(Debug, Clone, Default)]
+pub struct FeedbackFilter {
+    pub run_id: Option<Uuid>,
+    pub key: Option<String>,
+}
+
+/// Partial update for an existing run (2-phase lifecycle).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunPatch {
+    #[serde(default)]
+    pub end_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub status: Option<RunStatus>,
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    #[serde(default)]
+    pub output_tokens: Option<i64>,
+    #[serde(default)]
+    pub total_tokens: Option<i64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+}
+
+impl Run {
+    /// Apply a patch to this run, updating only the fields present in the patch.
+    pub fn apply_patch(&mut self, patch: &RunPatch) {
+        if let Some(end_time) = patch.end_time {
+            self.end_time = Some(end_time);
+            self.latency_ms = Some((end_time - self.start_time).num_milliseconds());
+        }
+        if let Some(ref output) = patch.output {
+            self.output = Some(output.clone());
+        }
+        if let Some(ref error) = patch.error {
+            self.error = Some(error.clone());
+        }
+        if let Some(status) = patch.status {
+            self.status = status;
+        }
+        if let Some(tokens) = patch.input_tokens {
+            self.input_tokens = Some(tokens);
+        }
+        if let Some(tokens) = patch.output_tokens {
+            self.output_tokens = Some(tokens);
+        }
+        if let Some(tokens) = patch.total_tokens {
+            self.total_tokens = Some(tokens);
+        }
+        if let Some(ms) = patch.latency_ms {
+            self.latency_ms = Some(ms);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Project / Dataset / Example
+// ---------------------------------------------------------------------------
+
+/// A project groups runs and datasets together.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A dataset contains a collection of examples for evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dataset {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A single example (input/output pair) in a dataset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Example {
+    pub id: Uuid,
+    pub dataset_id: Uuid,
+    pub input: String,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,12 +469,14 @@ mod tests {
 
     #[test]
     fn run_status_as_str() {
+        assert_eq!(RunStatus::Running.as_str(), "running");
         assert_eq!(RunStatus::Success.as_str(), "success");
         assert_eq!(RunStatus::Error.as_str(), "error");
     }
 
     #[test]
     fn run_status_from_str() {
+        assert_eq!("running".parse::<RunStatus>().unwrap(), RunStatus::Running);
         assert_eq!("success".parse::<RunStatus>().unwrap(), RunStatus::Success);
         assert_eq!("error".parse::<RunStatus>().unwrap(), RunStatus::Error);
         assert!("pending".parse::<RunStatus>().is_err());
@@ -426,5 +579,176 @@ mod tests {
         let stats = LatencyStats::default();
         assert_eq!(stats.p50, 0.0);
         assert_eq!(stats.p99, 0.0);
+    }
+
+    #[test]
+    fn feedback_serde_roundtrip() {
+        let fb = Feedback {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            key: "correctness".into(),
+            score: 0.95,
+            comment: Some("Great answer".into()),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&fb).unwrap();
+        let parsed: Feedback = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, fb.id);
+        assert_eq!(parsed.key, "correctness");
+        assert!((parsed.score - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn feedback_without_comment() {
+        let fb = Feedback {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            key: "helpfulness".into(),
+            score: 0.8,
+            comment: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&fb).unwrap();
+        let parsed: Feedback = serde_json::from_str(&json).unwrap();
+        assert!(parsed.comment.is_none());
+    }
+
+    #[test]
+    fn feedback_filter_default() {
+        let filter = FeedbackFilter::default();
+        assert!(filter.run_id.is_none());
+        assert!(filter.key.is_none());
+    }
+
+    #[test]
+    fn run_builder_start_creates_running_run() {
+        let run = Run::builder("test", RunType::Chain)
+            .project("proj")
+            .input(r#"{"q": "hello"}"#)
+            .start();
+
+        assert_eq!(run.status, RunStatus::Running);
+        assert!(run.end_time.is_none());
+        assert!(run.output.is_none());
+        assert!(run.error.is_none());
+        assert!(run.latency_ms.is_none());
+        assert_eq!(run.name, "test");
+        assert_eq!(run.input, r#"{"q": "hello"}"#);
+    }
+
+    #[test]
+    fn run_patch_apply() {
+        let mut run = Run::builder("test", RunType::Chain)
+            .project("proj")
+            .start();
+
+        assert_eq!(run.status, RunStatus::Running);
+        assert!(run.end_time.is_none());
+
+        let end_time = Utc::now();
+        let patch = RunPatch {
+            end_time: Some(end_time),
+            output: Some("result".into()),
+            status: Some(RunStatus::Success),
+            ..Default::default()
+        };
+
+        run.apply_patch(&patch);
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.end_time, Some(end_time));
+        assert_eq!(run.output.as_deref(), Some("result"));
+        assert!(run.latency_ms.is_some());
+    }
+
+    #[test]
+    fn run_patch_partial_apply() {
+        let mut run = Run::builder("test", RunType::Llm)
+            .finish_ok("original output");
+
+        let patch = RunPatch {
+            output_tokens: Some(42),
+            ..Default::default()
+        };
+
+        let original_output = run.output.clone();
+        run.apply_patch(&patch);
+
+        // Only output_tokens changed
+        assert_eq!(run.output_tokens, Some(42));
+        // Other fields unchanged
+        assert_eq!(run.output, original_output);
+        assert_eq!(run.status, RunStatus::Success);
+    }
+
+    #[test]
+    fn run_patch_serde_roundtrip() {
+        let patch = RunPatch {
+            status: Some(RunStatus::Success),
+            output: Some("done".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&patch).unwrap();
+        let parsed: RunPatch = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, Some(RunStatus::Success));
+        assert_eq!(parsed.output.as_deref(), Some("done"));
+        assert!(parsed.end_time.is_none());
+    }
+
+    #[test]
+    fn run_status_running_serde() {
+        let status = RunStatus::Running;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"running\"");
+        let parsed: RunStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, RunStatus::Running);
+    }
+
+    #[test]
+    fn project_serde_roundtrip() {
+        let p = Project {
+            id: Uuid::new_v4(),
+            name: "my-project".into(),
+            description: Some("A test project".into()),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let parsed: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, p.id);
+        assert_eq!(parsed.name, "my-project");
+        assert_eq!(parsed.description.as_deref(), Some("A test project"));
+    }
+
+    #[test]
+    fn dataset_serde_roundtrip() {
+        let d = Dataset {
+            id: Uuid::new_v4(),
+            name: "qa-set".into(),
+            description: None,
+            project_id: Some(Uuid::new_v4()),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let parsed: Dataset = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, d.id);
+        assert_eq!(parsed.name, "qa-set");
+        assert_eq!(parsed.project_id, d.project_id);
+    }
+
+    #[test]
+    fn example_serde_roundtrip() {
+        let e = Example {
+            id: Uuid::new_v4(),
+            dataset_id: Uuid::new_v4(),
+            input: r#"{"question": "What is 2+2?"}"#.into(),
+            output: Some("4".into()),
+            metadata: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: Example = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, e.id);
+        assert_eq!(parsed.dataset_id, e.dataset_id);
+        assert_eq!(parsed.output.as_deref(), Some("4"));
     }
 }

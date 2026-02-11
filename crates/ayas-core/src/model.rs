@@ -1,4 +1,7 @@
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -35,6 +38,23 @@ pub struct ChatResult {
     pub usage: Option<UsageMetadata>,
 }
 
+/// Events emitted during streaming model generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStreamEvent {
+    /// A text token from the model.
+    Token(String),
+    /// Start of a tool call.
+    ToolCallStart { id: String, name: String },
+    /// Partial arguments for an in-progress tool call.
+    ToolCallDelta { id: String, arguments: String },
+    /// Token usage metadata.
+    Usage(UsageMetadata),
+    /// Stream completed.
+    Done,
+}
+
 /// Trait for chat language models.
 ///
 /// Implementations should handle API communication, request formatting,
@@ -50,12 +70,46 @@ pub trait ChatModel: Send + Sync {
 
     /// Return the model name/identifier.
     fn model_name(&self) -> &str;
+
+    /// Stream a response token by token.
+    ///
+    /// Default implementation calls `generate` and wraps the result as events.
+    async fn stream(
+        &self,
+        messages: &[Message],
+        options: &CallOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent>> + Send>>> {
+        let result = self.generate(messages, options).await?;
+        let mut events: Vec<Result<ChatStreamEvent>> = Vec::new();
+        let content = result.message.content().to_string();
+        if !content.is_empty() {
+            events.push(Ok(ChatStreamEvent::Token(content)));
+        }
+        if let Message::AI(ref ai) = result.message {
+            for tc in &ai.tool_calls {
+                events.push(Ok(ChatStreamEvent::ToolCallStart {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                }));
+                events.push(Ok(ChatStreamEvent::ToolCallDelta {
+                    id: tc.id.clone(),
+                    arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                }));
+            }
+        }
+        if let Some(usage) = result.usage {
+            events.push(Ok(ChatStreamEvent::Usage(usage)));
+        }
+        events.push(Ok(ChatStreamEvent::Done));
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::message::{AIContent, ToolCall};
+    use futures::StreamExt;
 
     struct MockChatModel {
         response: String,
@@ -119,6 +173,137 @@ mod tests {
         assert!(opts.temperature.is_none());
         assert!(opts.tools.is_empty());
         assert!(opts.stop.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ChatStreamEvent tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stream_event_token_serde_roundtrip() {
+        let event = ChatStreamEvent::Token("Hello".into());
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"token""#));
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[test]
+    fn stream_event_tool_call_start_serde_roundtrip() {
+        let event = ChatStreamEvent::ToolCallStart {
+            id: "call_1".into(),
+            name: "calc".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"tool_call_start""#));
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[test]
+    fn stream_event_tool_call_delta_serde_roundtrip() {
+        let event = ChatStreamEvent::ToolCallDelta {
+            id: "call_1".into(),
+            arguments: r#"{"expr"#.into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"tool_call_delta""#));
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[test]
+    fn stream_event_usage_serde_roundtrip() {
+        let event = ChatStreamEvent::Usage(UsageMetadata {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"usage""#));
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[test]
+    fn stream_event_done_serde_roundtrip() {
+        let event = ChatStreamEvent::Done;
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"done""#));
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, parsed);
+    }
+
+    #[tokio::test]
+    async fn default_stream_text_response() {
+        let model = MockChatModel {
+            response: "Hello!".into(),
+        };
+        let messages = vec![Message::user("Hi")];
+        let options = CallOptions::default();
+        let mut stream = model.stream(&messages, &options).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+
+        assert_eq!(events.len(), 3); // Token + Usage + Done
+        assert_eq!(events[0], ChatStreamEvent::Token("Hello!".into()));
+        assert!(matches!(events[1], ChatStreamEvent::Usage(_)));
+        assert_eq!(events[2], ChatStreamEvent::Done);
+    }
+
+    #[tokio::test]
+    async fn default_stream_with_tool_calls() {
+        let model = MockToolCallModel;
+        let messages = vec![Message::user("calc 2+2")];
+        let options = CallOptions::default();
+        let mut stream = model.stream(&messages, &options).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+
+        // Token("thinking") + ToolCallStart + ToolCallDelta + Usage + Done
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0], ChatStreamEvent::Token("thinking".into()));
+        assert!(matches!(events[1], ChatStreamEvent::ToolCallStart { .. }));
+        assert!(matches!(events[2], ChatStreamEvent::ToolCallDelta { .. }));
+        assert!(matches!(events[3], ChatStreamEvent::Usage(_)));
+        assert_eq!(events[4], ChatStreamEvent::Done);
+    }
+
+    struct MockToolCallModel;
+
+    #[async_trait]
+    impl ChatModel for MockToolCallModel {
+        async fn generate(
+            &self,
+            _messages: &[Message],
+            _options: &CallOptions,
+        ) -> Result<ChatResult> {
+            Ok(ChatResult {
+                message: Message::ai_with_tool_calls(
+                    "thinking",
+                    vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "calculator".into(),
+                        arguments: serde_json::json!({"expr": "2+2"}),
+                    }],
+                ),
+                usage: Some(UsageMetadata {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                }),
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-tool-call"
+        }
     }
 
     #[test]

@@ -1,12 +1,15 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use chrono::Utc;
 use uuid::Uuid;
 
+use crate::duckdb_store::DuckDbStore;
 use crate::error::Result;
-use crate::types::Run;
+use crate::store::SmithStore;
+use crate::types::{Run, RunBuilder, RunStatus, RunType};
 use crate::writer;
 
 /// Configuration for the SmithClient.
@@ -22,6 +25,8 @@ pub struct SmithConfig {
     pub flush_interval: Duration,
     /// Whether tracing is enabled.
     pub enabled: bool,
+    /// Bounded channel capacity for backpressure control.
+    pub channel_capacity: usize,
 }
 
 impl Default for SmithConfig {
@@ -35,6 +40,7 @@ impl Default for SmithConfig {
             batch_size: 100,
             flush_interval: Duration::from_secs(5),
             enabled: true,
+            channel_capacity: 10_000,
         }
     }
 }
@@ -60,6 +66,11 @@ impl SmithConfig {
         self
     }
 
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = capacity;
+        self
+    }
+
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
         self
@@ -67,14 +78,16 @@ impl SmithConfig {
 }
 
 struct Inner {
-    sender: mpsc::UnboundedSender<Run>,
+    sender: flume::Sender<Run>,
     config: SmithConfig,
+    store: Arc<dyn SmithStore>,
+    drop_count: AtomicU64,
 }
 
 /// Client for submitting traced runs to background Parquet writer.
 ///
 /// Runs are buffered and written in batches for minimal performance impact.
-/// Submission failures are silently ignored (fail-safe).
+/// Uses a bounded channel for backpressure; full channel drops runs silently.
 #[derive(Clone)]
 pub struct SmithClient {
     inner: Option<Arc<Inner>>,
@@ -87,13 +100,25 @@ impl SmithClient {
             return Self::noop();
         }
 
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let store = Arc::new(DuckDbStore::new(&config.base_dir));
+        Self::with_store(config, store)
+    }
+
+    /// Create a new SmithClient with a custom store implementation.
+    pub fn with_store(config: SmithConfig, store: Arc<dyn SmithStore>) -> Self {
+        if !config.enabled {
+            return Self::noop();
+        }
+
+        let (sender, receiver) = flume::bounded(config.channel_capacity);
         let inner = Arc::new(Inner {
             sender,
             config: config.clone(),
+            store: store.clone(),
+            drop_count: AtomicU64::new(0),
         });
 
-        tokio::spawn(background_writer(receiver, config));
+        tokio::spawn(background_writer(receiver, config, store));
 
         Self { inner: Some(inner) }
     }
@@ -108,11 +133,27 @@ impl SmithClient {
         self.inner.is_some()
     }
 
-    /// Submit a run to the background writer. Silently ignores failures.
+    /// Submit a run to the background writer.
+    /// Uses try_send for non-blocking send; drops the run if the channel is full.
     pub fn submit_run(&self, run: Run) {
         if let Some(inner) = &self.inner {
-            let _ = inner.sender.send(run);
+            if inner.sender.try_send(run).is_err() {
+                let prev = inner.drop_count.fetch_add(1, Ordering::Relaxed);
+                if prev == 0 {
+                    eprintln!(
+                        "ayas-smith: channel full or closed, runs are being dropped"
+                    );
+                }
+            }
         }
+    }
+
+    /// Number of runs dropped because the channel was full or closed.
+    pub fn drop_count(&self) -> u64 {
+        self.inner
+            .as_ref()
+            .map(|i| i.drop_count.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// Get the project name for this client.
@@ -127,9 +168,18 @@ impl SmithClient {
     pub fn base_dir(&self) -> Option<&PathBuf> {
         self.inner.as_ref().map(|i| &i.config.base_dir)
     }
+
+    /// Get the underlying store, if enabled.
+    pub fn store(&self) -> Option<&Arc<dyn SmithStore>> {
+        self.inner.as_ref().map(|i| &i.store)
+    }
 }
 
-async fn background_writer(mut receiver: mpsc::UnboundedReceiver<Run>, config: SmithConfig) {
+async fn background_writer(
+    receiver: flume::Receiver<Run>,
+    config: SmithConfig,
+    store: Arc<dyn SmithStore>,
+) {
     let mut buffer: Vec<Run> = Vec::new();
 
     loop {
@@ -137,41 +187,39 @@ async fn background_writer(mut receiver: mpsc::UnboundedReceiver<Run>, config: S
         tokio::pin!(flush_timeout);
 
         tokio::select! {
-            msg = receiver.recv() => {
+            msg = receiver.recv_async() => {
                 match msg {
-                    Some(run) => {
+                    Ok(run) => {
                         buffer.push(run);
                         if buffer.len() >= config.batch_size {
-                            flush_buffer(&mut buffer, &config);
+                            flush_buffer(&mut buffer, &*store).await;
                         }
                     }
-                    None => {
+                    Err(_) => {
                         // Channel closed, flush remaining and exit
-                        flush_buffer(&mut buffer, &config);
+                        flush_buffer(&mut buffer, &*store).await;
                         return;
                     }
                 }
             }
             _ = &mut flush_timeout => {
                 if !buffer.is_empty() {
-                    flush_buffer(&mut buffer, &config);
+                    flush_buffer(&mut buffer, &*store).await;
                 }
             }
         }
     }
 }
 
-fn flush_buffer(buffer: &mut Vec<Run>, config: &SmithConfig) {
+async fn flush_buffer(buffer: &mut Vec<Run>, store: &dyn SmithStore) {
     if buffer.is_empty() {
         return;
     }
 
-    let batch_id = Uuid::new_v4().to_string()[..8].to_string();
-    let path = writer::parquet_path(&config.base_dir, &config.project, &batch_id);
     let runs = std::mem::take(buffer);
 
     // Fail-safe: errors in writing don't propagate
-    if let Err(e) = writer::write_runs(&runs, &path) {
+    if let Err(e) = store.put_runs(&runs).await {
         eprintln!("ayas-smith: failed to write runs: {e}");
     }
 }
@@ -182,6 +230,118 @@ pub fn flush_runs(runs: &[Run], base_dir: &std::path::Path, project: &str) -> Re
     let path = writer::parquet_path(base_dir, project, &batch_id);
     writer::write_runs(runs, &path)?;
     Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// RunGuard: RAII guard for 2-phase run lifecycle
+// ---------------------------------------------------------------------------
+
+/// RAII guard that manages a run's lifecycle.
+///
+/// On creation, submits a `Running` run. On explicit `finish_ok`/`finish_err`,
+/// submits the completed run. If dropped without finishing (e.g., during a panic),
+/// automatically submits an `Error` run.
+pub struct RunGuard {
+    client: SmithClient,
+    skeleton: Run,
+    finished: AtomicBool,
+}
+
+impl RunGuard {
+    /// Create a new RunGuard from a RunBuilder. Submits the initial Running run.
+    pub fn new(client: SmithClient, builder: RunBuilder) -> Self {
+        let skeleton = builder.start();
+        client.submit_run(skeleton.clone());
+        Self {
+            client,
+            skeleton,
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    /// Convenience: create a guard with common parameters.
+    pub fn start(
+        client: SmithClient,
+        name: impl Into<String>,
+        run_type: RunType,
+    ) -> Self {
+        let builder = Run::builder(name, run_type).project(client.project());
+        Self::new(client, builder)
+    }
+
+    /// Get the run_id of this guard's run.
+    pub fn run_id(&self) -> Uuid {
+        self.skeleton.run_id
+    }
+
+    /// Get the trace_id of this guard's run.
+    pub fn trace_id(&self) -> Uuid {
+        self.skeleton.trace_id
+    }
+
+    /// Complete the run successfully with the given output.
+    pub fn finish_ok(self, output: impl Into<String>) {
+        self.finished.store(true, Ordering::Release);
+        self.submit_final(RunStatus::Success, Some(output.into()), None);
+    }
+
+    /// Complete the run with an error.
+    pub fn finish_err(self, error: impl Into<String>) {
+        self.finished.store(true, Ordering::Release);
+        self.submit_final(RunStatus::Error, None, Some(error.into()));
+    }
+
+    /// Complete the run successfully with LLM token usage.
+    pub fn finish_llm(
+        self,
+        output: impl Into<String>,
+        input_tokens: i64,
+        output_tokens: i64,
+        total_tokens: i64,
+    ) {
+        self.finished.store(true, Ordering::Release);
+        let end_time = Utc::now();
+        let latency_ms = (end_time - self.skeleton.start_time).num_milliseconds();
+        let mut run = self.skeleton.clone();
+        run.end_time = Some(end_time);
+        run.status = RunStatus::Success;
+        run.output = Some(output.into());
+        run.input_tokens = Some(input_tokens);
+        run.output_tokens = Some(output_tokens);
+        run.total_tokens = Some(total_tokens);
+        run.latency_ms = Some(latency_ms);
+        self.client.submit_run(run);
+    }
+
+    fn submit_final(&self, status: RunStatus, output: Option<String>, error: Option<String>) {
+        let end_time = Utc::now();
+        let latency_ms = (end_time - self.skeleton.start_time).num_milliseconds();
+        let mut run = self.skeleton.clone();
+        run.end_time = Some(end_time);
+        run.status = status;
+        run.output = output;
+        run.error = error;
+        run.latency_ms = Some(latency_ms);
+        self.client.submit_run(run);
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if !self.finished.load(Ordering::Acquire) {
+            self.finished.store(true, Ordering::Release);
+            let end_time = Utc::now();
+            let latency_ms = (end_time - self.skeleton.start_time).num_milliseconds();
+            let mut run = self.skeleton.clone();
+            run.end_time = Some(end_time);
+            run.status = RunStatus::Error;
+            run.error = Some(
+                "run guard dropped without explicit finish (possible panic)".into(),
+            );
+            run.latency_ms = Some(latency_ms);
+            self.client.submit_run(run);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +355,7 @@ mod tests {
         assert!(config.base_dir.to_string_lossy().contains(".ayas-smith"));
         assert_eq!(config.project, "default");
         assert_eq!(config.batch_size, 100);
+        assert_eq!(config.channel_capacity, 10_000);
         assert!(config.enabled);
     }
 
@@ -204,12 +365,14 @@ mod tests {
             .with_base_dir("/tmp/test")
             .with_project("my-proj")
             .with_batch_size(50)
-            .with_flush_interval(Duration::from_secs(10));
+            .with_flush_interval(Duration::from_secs(10))
+            .with_channel_capacity(5_000);
 
         assert_eq!(config.base_dir, PathBuf::from("/tmp/test"));
         assert_eq!(config.project, "my-proj");
         assert_eq!(config.batch_size, 50);
         assert_eq!(config.flush_interval, Duration::from_secs(10));
+        assert_eq!(config.channel_capacity, 5_000);
     }
 
     #[test]
@@ -278,6 +441,27 @@ mod tests {
         assert!(project_dir.exists());
     }
 
+    #[tokio::test]
+    async fn bounded_channel_drops_when_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SmithConfig::default()
+            .with_base_dir(dir.path())
+            .with_channel_capacity(2)
+            .with_batch_size(1000) // large batch size so runs stay in channel
+            .with_flush_interval(Duration::from_secs(60));
+
+        let client = SmithClient::new(config);
+
+        // Submit more runs than channel capacity
+        for i in 0..10 {
+            let run = Run::builder(format!("run-{i}"), RunType::Chain).finish_ok("ok");
+            client.submit_run(run);
+        }
+
+        // Some runs should have been dropped
+        assert!(client.drop_count() > 0);
+    }
+
     #[test]
     fn flush_runs_sync() {
         let dir = tempfile::tempdir().unwrap();
@@ -297,5 +481,87 @@ mod tests {
     fn client_project_name() {
         let client = SmithClient::noop();
         assert_eq!(client.project(), "default");
+    }
+
+    // --- RunGuard tests ---
+
+    #[tokio::test]
+    async fn run_guard_finish_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SmithConfig::default()
+            .with_base_dir(dir.path())
+            .with_project("guard-test")
+            .with_batch_size(1)
+            .with_flush_interval(Duration::from_millis(50));
+
+        let client = SmithClient::new(config);
+
+        let guard = RunGuard::start(client.clone(), "test-chain", RunType::Chain);
+        let run_id = guard.run_id();
+        guard.finish_ok("result");
+
+        // Wait for flush
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Should have 2 entries (Running + Success), query dedup picks Success
+        let store = client.store().unwrap();
+        let run = store.get_run(run_id, "guard-test").await.unwrap();
+        assert!(run.is_some());
+        let run = run.unwrap();
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.output.as_deref(), Some("result"));
+    }
+
+    #[tokio::test]
+    async fn run_guard_finish_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SmithConfig::default()
+            .with_base_dir(dir.path())
+            .with_project("guard-test")
+            .with_batch_size(1)
+            .with_flush_interval(Duration::from_millis(50));
+
+        let client = SmithClient::new(config);
+
+        let guard = RunGuard::start(client.clone(), "fail-chain", RunType::Chain);
+        let run_id = guard.run_id();
+        guard.finish_err("something went wrong");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let store = client.store().unwrap();
+        let run = store.get_run(run_id, "guard-test").await.unwrap();
+        assert!(run.is_some());
+        let run = run.unwrap();
+        assert_eq!(run.status, RunStatus::Error);
+        assert_eq!(run.error.as_deref(), Some("something went wrong"));
+    }
+
+    #[tokio::test]
+    async fn run_guard_drop_sends_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SmithConfig::default()
+            .with_base_dir(dir.path())
+            .with_project("guard-test")
+            .with_batch_size(1)
+            .with_flush_interval(Duration::from_millis(50));
+
+        let client = SmithClient::new(config);
+        let run_id;
+
+        {
+            let guard = RunGuard::start(client.clone(), "drop-chain", RunType::Chain);
+            run_id = guard.run_id();
+            // Guard dropped without finish
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let store = client.store().unwrap();
+        let run = store.get_run(run_id, "guard-test").await.unwrap();
+        assert!(run.is_some());
+        let run = run.unwrap();
+        assert_eq!(run.status, RunStatus::Error);
+        assert!(run.error.as_deref().unwrap().contains("dropped without explicit finish"));
     }
 }

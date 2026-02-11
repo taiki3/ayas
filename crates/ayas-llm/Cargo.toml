@@ -9,6 +9,8 @@ description = "LLM provider implementations for the Ayas framework"
 [dependencies]
 ayas-core = { workspace = true }
 async-trait = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

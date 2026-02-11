@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
 
 use ayas_core::config::RunnableConfig;
 use ayas_core::error::Result;
-use ayas_core::message::Message;
-use ayas_core::model::{CallOptions, ChatModel, ChatResult};
+use ayas_core::message::{AIContent, Message, ToolCall, UsageMetadata};
+use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent};
 use ayas_core::runnable::Runnable;
 
 /// Adapts a ChatModel to the Runnable trait.
@@ -38,6 +42,68 @@ impl<M: ChatModel + 'static> Runnable for ChatModelRunnable<M> {
         let mut messages = input;
         messages.push(result.message);
         Ok(messages)
+    }
+
+    async fn stream(
+        &self,
+        input: Self::Input,
+        _config: &RunnableConfig,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Self::Output>> + Send>>>
+    where
+        Self::Output: 'static,
+    {
+        let event_stream = self.model.stream(&input, &self.options).await?;
+
+        let output_stream = async_stream::stream! {
+            let mut text = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut usage: Option<UsageMetadata> = None;
+            let mut tool_args: HashMap<String, String> = HashMap::new();
+
+            let mut event_stream = Box::pin(event_stream);
+            while let Some(event_result) = event_stream.next().await {
+                match event_result {
+                    Ok(ChatStreamEvent::Token(t)) => text.push_str(&t),
+                    Ok(ChatStreamEvent::ToolCallStart { id, name }) => {
+                        tool_calls.push(ToolCall {
+                            id: id.clone(),
+                            name,
+                            arguments: serde_json::Value::Null,
+                        });
+                        tool_args.insert(id, String::new());
+                    }
+                    Ok(ChatStreamEvent::ToolCallDelta { id, arguments }) => {
+                        if let Some(buf) = tool_args.get_mut(&id) {
+                            buf.push_str(&arguments);
+                        }
+                    }
+                    Ok(ChatStreamEvent::Usage(u)) => usage = Some(u),
+                    Ok(ChatStreamEvent::Done) => break,
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
+
+            // Finalize tool call arguments
+            for tc in &mut tool_calls {
+                if let Some(args_str) = tool_args.get(&tc.id) {
+                    tc.arguments = serde_json::from_str(args_str)
+                        .unwrap_or(serde_json::Value::String(args_str.clone()));
+                }
+            }
+
+            let mut messages = input;
+            messages.push(Message::AI(AIContent {
+                content: text,
+                tool_calls,
+                usage,
+            }));
+            yield Ok(messages);
+        };
+
+        Ok(Box::pin(output_stream))
     }
 }
 
@@ -117,6 +183,29 @@ mod tests {
         let r = ChatModelRunnable::new(ErrorModel, CallOptions::default());
         let input = vec![Message::user("Hi")];
         let result = r.invoke(input, &RunnableConfig::default()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_uses_model_stream() {
+        let r = ChatModelRunnable::new(
+            MockModel {
+                response: "Streamed!".into(),
+            },
+            CallOptions::default(),
+        );
+        let input = vec![Message::user("Hi")];
+        let mut stream = r.stream(input, &RunnableConfig::default()).await.unwrap();
+        let result = stream.next().await.unwrap().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].content(), "Streamed!");
+    }
+
+    #[tokio::test]
+    async fn stream_propagates_error() {
+        let r = ChatModelRunnable::new(ErrorModel, CallOptions::default());
+        let input = vec![Message::user("Hi")];
+        let result = r.stream(input, &RunnableConfig::default()).await;
         assert!(result.is_err());
     }
 }

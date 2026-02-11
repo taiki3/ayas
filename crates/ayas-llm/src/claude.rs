@@ -1,17 +1,26 @@
 //! Anthropic Claude API integration.
 
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use ayas_core::error::{AyasError, ModelError, Result};
 use ayas_core::message::{
     AIContent, ContentPart, ContentSource, Message, MessageContent, ToolCall, UsageMetadata,
 };
-use ayas_core::model::{CallOptions, ChatModel, ChatResult};
+use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent};
+
+use crate::sse::sse_data_stream;
 
 // ---------------------------------------------------------------------------
 // Anthropic Messages API request/response types
 // ---------------------------------------------------------------------------
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 
 #[derive(Debug, Serialize)]
 pub struct AnthropicRequest {
@@ -26,6 +35,8 @@ pub struct AnthropicRequest {
     pub stop_sequences: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicToolDef>>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +292,7 @@ impl ClaudeChatModel {
                 Some(options.stop.clone())
             },
             tools,
+            stream: false,
         }
     }
 }
@@ -362,6 +374,175 @@ impl ChatModel for ClaudeChatModel {
     fn model_name(&self) -> &str {
         &self.model_id
     }
+
+    async fn stream(
+        &self,
+        messages: &[Message],
+        options: &CallOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent>> + Send>>> {
+        let mut request_body = self.build_request(messages, options);
+        request_body.stream = true;
+
+        let response = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AyasError::Model(ModelError::ApiRequest(e.to_string())))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read response body".into());
+            let error_msg = serde_json::from_str::<AnthropicError>(&body)
+                .map(|e| e.error.message)
+                .unwrap_or(body);
+            return Err(AyasError::Model(match status.as_u16() {
+                401 => ModelError::Auth(error_msg),
+                429 => ModelError::RateLimited {
+                    retry_after_secs: None,
+                },
+                _ => ModelError::ApiRequest(format!("HTTP {status}: {error_msg}")),
+            }));
+        }
+
+        let data_stream = sse_data_stream(response);
+
+        let event_stream = async_stream::stream! {
+            let mut current_tool_id = String::new();
+            let mut input_tokens = 0u64;
+            let mut data_stream = Box::pin(data_stream);
+
+            while let Some(data) = data_stream.next().await {
+                let json: serde_json::Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match json["type"].as_str().unwrap_or("") {
+                    "message_start" => {
+                        input_tokens = json["message"]["usage"]["input_tokens"]
+                            .as_u64()
+                            .unwrap_or(0);
+                    }
+                    "content_block_start" => {
+                        let block = &json["content_block"];
+                        if block["type"].as_str() == Some("tool_use") {
+                            current_tool_id =
+                                block["id"].as_str().unwrap_or("").to_string();
+                            yield Ok(ChatStreamEvent::ToolCallStart {
+                                id: current_tool_id.clone(),
+                                name: block["name"].as_str().unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                    "content_block_delta" => {
+                        let delta = &json["delta"];
+                        match delta["type"].as_str() {
+                            Some("text_delta") => {
+                                if let Some(text) = delta["text"].as_str() {
+                                    yield Ok(ChatStreamEvent::Token(text.to_string()));
+                                }
+                            }
+                            Some("input_json_delta") => {
+                                if let Some(partial) = delta["partial_json"].as_str() {
+                                    yield Ok(ChatStreamEvent::ToolCallDelta {
+                                        id: current_tool_id.clone(),
+                                        arguments: partial.to_string(),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    "message_delta" => {
+                        let output_tokens =
+                            json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                        yield Ok(ChatStreamEvent::Usage(UsageMetadata {
+                            input_tokens,
+                            output_tokens,
+                            total_tokens: input_tokens + output_tokens,
+                        }));
+                    }
+                    "message_stop" => {
+                        yield Ok(ChatStreamEvent::Done);
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        Ok(Box::pin(event_stream))
+    }
+}
+
+/// Parse a single Claude SSE data line into stream events (for testing).
+pub fn parse_claude_sse_data(
+    data: &str,
+    current_tool_id: &mut String,
+    input_tokens: &mut u64,
+) -> Vec<ChatStreamEvent> {
+    let mut events = Vec::new();
+    let json: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return events,
+    };
+
+    match json["type"].as_str().unwrap_or("") {
+        "message_start" => {
+            *input_tokens = json["message"]["usage"]["input_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+        }
+        "content_block_start" => {
+            let block = &json["content_block"];
+            if block["type"].as_str() == Some("tool_use") {
+                *current_tool_id = block["id"].as_str().unwrap_or("").to_string();
+                events.push(ChatStreamEvent::ToolCallStart {
+                    id: current_tool_id.clone(),
+                    name: block["name"].as_str().unwrap_or("").to_string(),
+                });
+            }
+        }
+        "content_block_delta" => {
+            let delta = &json["delta"];
+            match delta["type"].as_str() {
+                Some("text_delta") => {
+                    if let Some(text) = delta["text"].as_str() {
+                        events.push(ChatStreamEvent::Token(text.to_string()));
+                    }
+                }
+                Some("input_json_delta") => {
+                    if let Some(partial) = delta["partial_json"].as_str() {
+                        events.push(ChatStreamEvent::ToolCallDelta {
+                            id: current_tool_id.clone(),
+                            arguments: partial.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        "message_delta" => {
+            let output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            events.push(ChatStreamEvent::Usage(UsageMetadata {
+                input_tokens: *input_tokens,
+                output_tokens,
+                total_tokens: *input_tokens + output_tokens,
+            }));
+        }
+        "message_stop" => {
+            events.push(ChatStreamEvent::Done);
+        }
+        _ => {}
+    }
+
+    events
 }
 
 #[cfg(test)]
@@ -592,5 +773,136 @@ mod tests {
             }
             _ => panic!("expected ToolUse"),
         }
+    }
+
+    #[test]
+    fn build_request_stream_false_by_default() {
+        let model = make_model();
+        let messages = vec![Message::user("Hello")];
+        let options = CallOptions::default();
+        let req = model.build_request(&messages, &options);
+        assert!(!req.stream);
+        // stream: false should be omitted in JSON
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("stream"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_sse_message_start() {
+        let data = r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":25,"output_tokens":1}}}"#;
+        let mut tool_id = String::new();
+        let mut input_tokens = 0u64;
+        let events = parse_claude_sse_data(data, &mut tool_id, &mut input_tokens);
+        assert!(events.is_empty());
+        assert_eq!(input_tokens, 25);
+    }
+
+    #[test]
+    fn parse_sse_text_delta() {
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let mut tool_id = String::new();
+        let mut input_tokens = 0u64;
+        let events = parse_claude_sse_data(data, &mut tool_id, &mut input_tokens);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], ChatStreamEvent::Token("Hello".into()));
+    }
+
+    #[test]
+    fn parse_sse_tool_use_start() {
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"calculator","input":{}}}"#;
+        let mut tool_id = String::new();
+        let mut input_tokens = 0u64;
+        let events = parse_claude_sse_data(data, &mut tool_id, &mut input_tokens);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ChatStreamEvent::ToolCallStart {
+                id: "toolu_01".into(),
+                name: "calculator".into(),
+            }
+        );
+        assert_eq!(tool_id, "toolu_01");
+    }
+
+    #[test]
+    fn parse_sse_tool_use_delta() {
+        let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"expr"}}"#;
+        let mut tool_id = "toolu_01".to_string();
+        let mut input_tokens = 0u64;
+        let events = parse_claude_sse_data(data, &mut tool_id, &mut input_tokens);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ChatStreamEvent::ToolCallDelta {
+                id: "toolu_01".into(),
+                arguments: r#"{"expr"#.into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_sse_message_delta_usage() {
+        let data =
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#;
+        let mut tool_id = String::new();
+        let mut input_tokens = 25u64;
+        let events = parse_claude_sse_data(data, &mut tool_id, &mut input_tokens);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ChatStreamEvent::Usage(UsageMetadata {
+                input_tokens: 25,
+                output_tokens: 12,
+                total_tokens: 37,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_sse_message_stop() {
+        let data = r#"{"type":"message_stop"}"#;
+        let mut tool_id = String::new();
+        let mut input_tokens = 0u64;
+        let events = parse_claude_sse_data(data, &mut tool_id, &mut input_tokens);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], ChatStreamEvent::Done);
+    }
+
+    #[test]
+    fn parse_sse_full_text_sequence() {
+        let sse_events = [
+            r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world!"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+
+        let mut tool_id = String::new();
+        let mut input_tokens = 0u64;
+        let mut all_events = Vec::new();
+
+        for sse in &sse_events {
+            all_events.extend(parse_claude_sse_data(sse, &mut tool_id, &mut input_tokens));
+        }
+
+        assert_eq!(all_events.len(), 4);
+        assert_eq!(all_events[0], ChatStreamEvent::Token("Hello".into()));
+        assert_eq!(all_events[1], ChatStreamEvent::Token(" world!".into()));
+        assert_eq!(
+            all_events[2],
+            ChatStreamEvent::Usage(UsageMetadata {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+            })
+        );
+        assert_eq!(all_events[3], ChatStreamEvent::Done);
     }
 }

@@ -42,6 +42,7 @@ pub fn runs_schema() -> Schema {
         Field::new("output_tokens", DataType::Int64, true),
         Field::new("total_tokens", DataType::Int64, true),
         Field::new("latency_ms", DataType::Int64, true),
+        Field::new("dotted_order", DataType::Utf8, true),
     ])
 }
 
@@ -121,6 +122,11 @@ pub fn runs_to_record_batch(runs: &[Run]) -> Result<RecordBatch> {
     let latency_ms: ArrayRef = Arc::new(Int64Array::from(
         runs.iter().map(|r| r.latency_ms).collect::<Vec<_>>(),
     ));
+    let dotted_orders: ArrayRef = Arc::new(StringArray::from(
+        runs.iter()
+            .map(|r| r.dotted_order.as_deref())
+            .collect::<Vec<_>>(),
+    ));
 
     let batch = RecordBatch::try_new(
         schema,
@@ -143,6 +149,7 @@ pub fn runs_to_record_batch(runs: &[Run]) -> Result<RecordBatch> {
             output_tokens,
             total_tokens,
             latency_ms,
+            dotted_orders,
         ],
     )?;
 
@@ -199,9 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_18_columns() {
+    fn schema_has_19_columns() {
         let schema = runs_schema();
-        assert_eq!(schema.fields().len(), 18);
+        assert_eq!(schema.fields().len(), 19);
     }
 
     #[test]
@@ -219,7 +226,7 @@ mod tests {
         let runs = sample_runs(3);
         let batch = runs_to_record_batch(&runs).unwrap();
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 18);
+        assert_eq!(batch.num_columns(), 19);
     }
 
     #[test]

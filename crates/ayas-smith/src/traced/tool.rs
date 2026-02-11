@@ -6,6 +6,7 @@ use ayas_core::error::Result;
 use ayas_core::tool::{Tool, ToolDefinition};
 
 use crate::client::SmithClient;
+use crate::context::{build_dotted_order, SMITH_TRACE_CTX};
 use crate::types::{Run, RunType};
 
 /// A Tool wrapper that records tracing information for each invocation.
@@ -33,10 +34,27 @@ impl Tool for TracedTool {
 
         let tool_name = self.inner.definition().name;
         let input_json = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
+        let run_id = uuid::Uuid::new_v4();
+        let start_time = chrono::Utc::now();
 
-        let builder = Run::builder(&tool_name, RunType::Tool)
+        // Try to get trace context from task-local (set by TracedRunnable)
+        let ctx = SMITH_TRACE_CTX.try_with(|c| c.clone()).ok();
+
+        let mut builder = Run::builder(&tool_name, RunType::Tool)
+            .run_id(run_id)
             .project(self.client.project())
-            .input(&input_json);
+            .input(&input_json)
+            .start_time(start_time);
+
+        if let Some(ref ctx) = ctx {
+            builder = builder.trace_id(ctx.trace_id);
+            if let Some(pid) = ctx.parent_run_id {
+                builder = builder.parent_run_id(pid);
+            }
+            let dotted_order =
+                build_dotted_order(start_time, run_id, Some(&ctx.dotted_order));
+            builder = builder.dotted_order(dotted_order);
+        }
 
         match self.inner.call(input).await {
             Ok(output) => {
@@ -56,6 +74,7 @@ impl Tool for TracedTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::SmithTraceCtx;
     use ayas_core::error::AyasError;
 
     struct MockTool;
@@ -133,5 +152,46 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(dir.path().join("default").exists());
+    }
+
+    #[tokio::test]
+    async fn traced_tool_inherits_trace_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::client::SmithConfig::default()
+            .with_base_dir(dir.path())
+            .with_project("test-proj")
+            .with_batch_size(1)
+            .with_flush_interval(std::time::Duration::from_millis(50));
+        let client = SmithClient::new(config);
+
+        let trace_id = uuid::Uuid::new_v4();
+        let parent_run_id = uuid::Uuid::new_v4();
+        let ctx = SmithTraceCtx {
+            trace_id,
+            parent_run_id: Some(parent_run_id),
+            dotted_order: "20250210T120000000000Z.abc12345".into(),
+        };
+
+        let tool = TracedTool::new(Arc::new(MockTool), client);
+
+        SMITH_TRACE_CTX
+            .scope(ctx, async {
+                tool.call(serde_json::json!({"query": "test"})).await.unwrap();
+            })
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let query = crate::query::SmithQuery::new(dir.path()).unwrap();
+        let filter = crate::types::RunFilter {
+            project: Some("test-proj".into()),
+            run_type: Some(RunType::Tool),
+            ..Default::default()
+        };
+        let runs = query.list_runs(&filter).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].trace_id, trace_id);
+        assert_eq!(runs[0].parent_run_id, Some(parent_run_id));
+        assert!(runs[0].dotted_order.is_some());
     }
 }

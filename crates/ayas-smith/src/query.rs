@@ -7,6 +7,16 @@ use uuid::Uuid;
 use crate::error::{Result, SmithError};
 use crate::types::{LatencyStats, Run, RunFilter, RunStatus, RunType, TokenUsageSummary};
 
+/// Explicit column list with timestamp casts for reliable reading from DuckDB.
+/// DuckDB's Rust bindings may not auto-cast Timestamp columns to String,
+/// so we CAST timestamp columns to VARCHAR at the SQL level.
+const SELECT_COLUMNS: &str = "\
+    run_id, parent_run_id, trace_id, name, run_type, project, \
+    CAST(start_time AS VARCHAR) AS start_time, \
+    CAST(end_time AS VARCHAR) AS end_time, \
+    status, input, output, error, tags, metadata, \
+    input_tokens, output_tokens, total_tokens, latency_ms, dotted_order";
+
 /// DuckDB-based query client for reading traced runs from Parquet files.
 pub struct SmithQuery {
     conn: Connection,
@@ -70,12 +80,6 @@ impl SmithQuery {
             param_values.push(Box::new(before.to_rfc3339()));
         }
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
-
         let limit_clause = filter
             .limit
             .map(|l| format!(" LIMIT {l}"))
@@ -86,7 +90,21 @@ impl SmithQuery {
             .unwrap_or_default();
 
         let sql = format!(
-            "SELECT * FROM read_parquet('{glob}'){where_clause} ORDER BY start_time DESC{limit_clause}{offset_clause}"
+            "WITH deduped AS (\
+                SELECT *, ROW_NUMBER() OVER (\
+                    PARTITION BY run_id \
+                    ORDER BY CASE WHEN status != 'running' THEN 1 ELSE 0 END DESC, \
+                             CASE WHEN end_time IS NOT NULL THEN 1 ELSE 0 END DESC\
+                ) AS _rn \
+                FROM read_parquet('{glob}')\
+            ) \
+            SELECT {SELECT_COLUMNS} FROM deduped WHERE _rn = 1{and_where_clause} \
+            ORDER BY start_time DESC{limit_clause}{offset_clause}",
+            and_where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" AND {}", conditions.join(" AND "))
+            },
         );
 
         let params_refs: Vec<&dyn duckdb::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
@@ -106,11 +124,15 @@ impl SmithQuery {
         Ok(runs)
     }
 
-    /// Get a single run by its ID.
+    /// Get a single run by its ID (deduplicated: prefers completed over running).
     pub fn get_run(&self, run_id: Uuid, project: &str) -> Result<Option<Run>> {
         let glob = self.parquet_glob(project);
         let sql = format!(
-            "SELECT * FROM read_parquet('{glob}') WHERE run_id = ?"
+            "SELECT {SELECT_COLUMNS} FROM read_parquet('{glob}') \
+             WHERE run_id = ? \
+             ORDER BY CASE WHEN status != 'running' THEN 1 ELSE 0 END DESC, \
+                      CASE WHEN end_time IS NOT NULL THEN 1 ELSE 0 END DESC \
+             LIMIT 1"
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -287,6 +309,7 @@ fn row_to_run(row: &duckdb::Row<'_>) -> Run {
     let output_tokens: Option<i64> = row.get(15).ok();
     let total_tokens: Option<i64> = row.get(16).ok();
     let latency_ms: Option<i64> = row.get(17).ok();
+    let dotted_order: Option<String> = row.get(18).ok();
 
     let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
 
@@ -311,6 +334,7 @@ fn row_to_run(row: &duckdb::Row<'_>) -> Run {
         output_tokens,
         total_tokens,
         latency_ms,
+        dotted_order,
     }
 }
 

@@ -6,7 +6,7 @@ use ayas_core::error::Result;
 use ayas_core::runnable::Runnable;
 
 use crate::client::SmithClient;
-use crate::context::{child_config, trace_context};
+use crate::context::{build_dotted_order, child_config, trace_context, SmithTraceCtx, SMITH_TRACE_CTX};
 use crate::types::{Run, RunType};
 
 /// A Runnable wrapper that records tracing information for each invocation.
@@ -43,8 +43,10 @@ where
             return self.inner.invoke(input, config).await;
         }
 
-        let (trace_id, parent_run_id) = trace_context(config);
+        let (trace_id, parent_run_id, parent_dotted_order) = trace_context(config);
         let run_id = uuid::Uuid::new_v4();
+        let start_time = chrono::Utc::now();
+        let dotted_order = build_dotted_order(start_time, run_id, parent_dotted_order.as_deref());
 
         let input_json = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
 
@@ -53,15 +55,29 @@ where
             .trace_id(trace_id)
             .project(self.client.project())
             .input(&input_json)
-            .tags(config.tags.clone());
+            .tags(config.tags.clone())
+            .start_time(start_time)
+            .dotted_order(&dotted_order);
 
         if let Some(pid) = parent_run_id {
             builder = builder.parent_run_id(pid);
         }
 
-        let child_cfg = child_config(config, run_id, trace_id);
+        let child_cfg = child_config(config, run_id, trace_id, &dotted_order);
 
-        match self.inner.invoke(input, &child_cfg).await {
+        // Set task-local context so nested TracedChatModel/TracedTool can
+        // inherit trace_id, parent_run_id, and dotted_order.
+        let ctx = SmithTraceCtx {
+            trace_id,
+            parent_run_id: Some(run_id),
+            dotted_order: dotted_order.clone(),
+        };
+
+        let result = SMITH_TRACE_CTX
+            .scope(ctx, async { self.inner.invoke(input, &child_cfg).await })
+            .await;
+
+        match result {
             Ok(output) => {
                 let output_json =
                     serde_json::to_string(&output).unwrap_or_else(|_| "null".into());
@@ -149,5 +165,31 @@ mod tests {
         // Wait for flush
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(dir.path().join("default").exists());
+    }
+
+    #[tokio::test]
+    async fn traced_runnable_sets_dotted_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let smith_config = crate::client::SmithConfig::default()
+            .with_base_dir(dir.path())
+            .with_project("test-proj")
+            .with_batch_size(1)
+            .with_flush_interval(std::time::Duration::from_millis(50));
+        let client = SmithClient::new(smith_config);
+
+        let traced = TracedRunnable::new(AddOne, client, "add-one", RunType::Chain);
+        let config = RunnableConfig::default();
+        traced.invoke(5, &config).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let query = crate::query::SmithQuery::new(dir.path()).unwrap();
+        let filter = crate::types::RunFilter {
+            project: Some("test-proj".into()),
+            ..Default::default()
+        };
+        let runs = query.list_runs(&filter).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].dotted_order.is_some());
     }
 }

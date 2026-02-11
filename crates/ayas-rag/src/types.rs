@@ -45,7 +45,7 @@ impl EmbeddingVector {
 }
 
 /// A search result with similarity score.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub document: Document,
     pub score: f32,

@@ -1,8 +1,10 @@
 pub mod agent;
 pub mod chat;
+pub mod datasets;
 pub mod feedback;
 pub mod graph;
 pub mod hitl;
+pub mod projects;
 pub mod research;
 pub mod runs;
 
@@ -14,6 +16,8 @@ pub fn api_routes(state: AppState) -> Router {
     // Stateful routes: convert Router<AppState> to Router<()> via .with_state()
     let stateful: Router = runs::routes()
         .merge(feedback::routes())
+        .merge(projects::routes())
+        .merge(datasets::routes())
         .with_state(state);
 
     // Stateless routes (already Router<()>)

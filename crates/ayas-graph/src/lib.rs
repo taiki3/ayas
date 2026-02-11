@@ -24,6 +24,9 @@ pub mod prelude {
     pub use crate::node::NodeFn;
     pub use crate::state_graph::StateGraph;
     pub use crate::stream::StreamEvent;
+    pub use ayas_core::stream::{
+        StreamEvent as CoreStreamEvent, StreamMode, parse_stream_modes,
+    };
     pub use crate::subgraph::subgraph_node;
     pub use crate::time_travel::{fork_from_checkpoint, get_state_history, replay_to_step};
 }

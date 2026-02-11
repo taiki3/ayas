@@ -3,19 +3,74 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use ayas_smith::prelude::{
-    LatencyStats, Run, RunFilter, RunStatus, RunType, TokenUsageSummary,
+    LatencyStats, Run, RunFilter, RunPatch, RunStatus, RunType, TokenUsageSummary,
 };
 
 // --- Batch Ingest ---
 
+/// Legacy batch ingest request (backward compatible).
 #[derive(Debug, Deserialize)]
 pub struct BatchIngestRequest {
     pub runs: Vec<RunDto>,
 }
 
+/// New batch request supporting both POST (new runs) and PATCH (updates).
+#[derive(Debug, Deserialize)]
+pub struct BatchRunRequest {
+    #[serde(default)]
+    pub post: Vec<RunDto>,
+    #[serde(default)]
+    pub patch: Vec<RunPatchRequest>,
+}
+
+/// Request to patch an existing run.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunPatchRequest {
+    pub run_id: Uuid,
+    #[serde(default = "default_project")]
+    pub project: String,
+    #[serde(default)]
+    pub end_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub status: Option<RunStatus>,
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    #[serde(default)]
+    pub output_tokens: Option<i64>,
+    #[serde(default)]
+    pub total_tokens: Option<i64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+}
+
+impl From<&RunPatchRequest> for RunPatch {
+    fn from(req: &RunPatchRequest) -> Self {
+        RunPatch {
+            end_time: req.end_time,
+            output: req.output.clone(),
+            error: req.error.clone(),
+            status: req.status,
+            input_tokens: req.input_tokens,
+            output_tokens: req.output_tokens,
+            total_tokens: req.total_tokens,
+            latency_ms: req.latency_ms,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BatchIngestResponse {
     pub ingested: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchRunResponse {
+    pub posted: usize,
+    pub patched: usize,
 }
 
 /// A JSON-friendly representation for ingesting runs via the API.
@@ -91,6 +146,7 @@ impl From<RunDto> for Run {
             output_tokens: dto.output_tokens,
             total_tokens: dto.total_tokens,
             latency_ms: dto.latency_ms,
+            dotted_order: None,
         }
     }
 }
@@ -247,6 +303,46 @@ pub struct FeedbackQueryRequest {
     pub run_id: Option<Uuid>,
     #[serde(default)]
     pub key: Option<String>,
+}
+
+// --- Projects ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+// --- Datasets ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDatasetRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListDatasetsQuery {
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddExamplesRequest {
+    pub examples: Vec<ExampleInput>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExampleInput {
+    pub input: String,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<String>,
 }
 
 #[cfg(test)]
@@ -408,5 +504,60 @@ mod tests {
         let json = "{}";
         let q: ProjectQuery = serde_json::from_str(json).unwrap();
         assert_eq!(q.project, "default");
+    }
+
+    #[test]
+    fn batch_run_request_deserialize() {
+        let run_id = Uuid::new_v4();
+        let json = serde_json::json!({
+            "post": [{
+                "name": "test-chain",
+                "run_type": "chain",
+                "status": "running"
+            }],
+            "patch": [{
+                "run_id": run_id,
+                "project": "test-proj",
+                "status": "success",
+                "output": "result"
+            }]
+        });
+        let req: BatchRunRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.post.len(), 1);
+        assert_eq!(req.patch.len(), 1);
+        assert_eq!(req.patch[0].run_id, run_id);
+        assert_eq!(req.patch[0].status, Some(RunStatus::Success));
+    }
+
+    #[test]
+    fn run_patch_request_to_run_patch() {
+        let req = RunPatchRequest {
+            run_id: Uuid::new_v4(),
+            project: "test-proj".into(),
+            end_time: None,
+            output: Some("result".into()),
+            error: None,
+            status: Some(RunStatus::Success),
+            input_tokens: None,
+            output_tokens: Some(42),
+            total_tokens: None,
+            latency_ms: None,
+        };
+        let patch = RunPatch::from(&req);
+        assert_eq!(patch.output.as_deref(), Some("result"));
+        assert_eq!(patch.status, Some(RunStatus::Success));
+        assert_eq!(patch.output_tokens, Some(42));
+        assert!(patch.end_time.is_none());
+    }
+
+    #[test]
+    fn run_status_running_in_dto() {
+        let json = r#"{
+            "name": "my-chain",
+            "run_type": "chain",
+            "status": "running"
+        }"#;
+        let dto: RunDto = serde_json::from_str(json).unwrap();
+        assert_eq!(dto.status, RunStatus::Running);
     }
 }

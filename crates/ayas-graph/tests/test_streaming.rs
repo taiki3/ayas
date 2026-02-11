@@ -369,3 +369,227 @@ async fn test_streaming_serialization() {
     let deserialized: StreamEvent = serde_json::from_str(&json_str).unwrap();
     assert!(matches!(deserialized, StreamEvent::GraphComplete { output } if output["count"] == json!(42)));
 }
+
+// ---- Multi-mode streaming (stream_with_modes) tests ----
+
+use ayas_core::stream::{StreamEvent as CoreStreamEvent, StreamMode};
+
+async fn collect_core_events(
+    mut rx: mpsc::Receiver<CoreStreamEvent>,
+) -> Vec<CoreStreamEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn test_stream_with_modes_values_only() {
+    let graph = build_abc_graph();
+    let config = default_config();
+    let (tx, rx) = mpsc::channel(64);
+
+    let result = graph
+        .stream_with_modes(json!({}), &config, &[StreamMode::Values], tx)
+        .await
+        .unwrap();
+
+    assert_eq!(result["count"], json!(3));
+
+    let events = collect_core_events(rx).await;
+
+    // Should have: 3 Values events + 1 GraphComplete
+    let values_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Values { .. }))
+        .count();
+    let complete_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::GraphComplete { .. }))
+        .count();
+    let debug_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Debug { .. }))
+        .count();
+
+    assert_eq!(values_count, 3);
+    assert_eq!(complete_count, 1);
+    assert_eq!(debug_count, 0);
+}
+
+#[tokio::test]
+async fn test_stream_with_modes_updates_only() {
+    let graph = build_abc_graph();
+    let config = default_config();
+    let (tx, rx) = mpsc::channel(64);
+
+    let result = graph
+        .stream_with_modes(json!({}), &config, &[StreamMode::Updates], tx)
+        .await
+        .unwrap();
+
+    assert_eq!(result["count"], json!(3));
+
+    let events = collect_core_events(rx).await;
+
+    let updates: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            CoreStreamEvent::Updates { node, data } => Some((node.clone(), data.clone())),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(updates.len(), 3);
+    assert_eq!(updates[0].0, "a");
+    assert_eq!(updates[0].1["count"], json!(1));
+    assert_eq!(updates[1].0, "b");
+    assert_eq!(updates[1].1["count"], json!(2));
+    assert_eq!(updates[2].0, "c");
+    assert_eq!(updates[2].1["count"], json!(3));
+}
+
+#[tokio::test]
+async fn test_stream_with_modes_debug_only() {
+    let graph = build_ab_graph();
+    let config = default_config();
+    let (tx, rx) = mpsc::channel(64);
+
+    graph
+        .stream_with_modes(json!({}), &config, &[StreamMode::Debug], tx)
+        .await
+        .unwrap();
+
+    let events = collect_core_events(rx).await;
+
+    let debug_events: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            CoreStreamEvent::Debug {
+                event_type,
+                payload,
+            } => Some((event_type.clone(), payload.clone())),
+            _ => None,
+        })
+        .collect();
+
+    // node_start(a), node_end(a), edge_transition(a->b), node_start(b), node_end(b), (no edge after b since b is finish)
+    let node_starts: Vec<_> = debug_events
+        .iter()
+        .filter(|(t, _)| t == "node_start")
+        .collect();
+    let node_ends: Vec<_> = debug_events
+        .iter()
+        .filter(|(t, _)| t == "node_end")
+        .collect();
+    let edge_transitions: Vec<_> = debug_events
+        .iter()
+        .filter(|(t, _)| t == "edge_transition")
+        .collect();
+
+    assert_eq!(node_starts.len(), 2);
+    assert_eq!(node_ends.len(), 2);
+    assert!(edge_transitions.len() >= 1);
+
+    // No Values or Updates events should be present
+    let values_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Values { .. }))
+        .count();
+    let updates_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Updates { .. }))
+        .count();
+    assert_eq!(values_count, 0);
+    assert_eq!(updates_count, 0);
+}
+
+#[tokio::test]
+async fn test_stream_with_modes_multiple() {
+    let graph = build_ab_graph();
+    let config = default_config();
+    let (tx, rx) = mpsc::channel(64);
+
+    graph
+        .stream_with_modes(
+            json!({}),
+            &config,
+            &[StreamMode::Values, StreamMode::Updates, StreamMode::Debug],
+            tx,
+        )
+        .await
+        .unwrap();
+
+    let events = collect_core_events(rx).await;
+
+    let values_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Values { .. }))
+        .count();
+    let updates_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Updates { .. }))
+        .count();
+    let debug_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::Debug { .. }))
+        .count();
+    let complete_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::GraphComplete { .. }))
+        .count();
+
+    assert_eq!(values_count, 2);
+    assert_eq!(updates_count, 2);
+    assert!(debug_count >= 4); // at least node_start + node_end for each node
+    assert_eq!(complete_count, 1);
+}
+
+#[tokio::test]
+async fn test_stream_with_modes_values_state_progression() {
+    let graph = build_abc_graph();
+    let config = default_config();
+    let (tx, rx) = mpsc::channel(64);
+
+    graph
+        .stream_with_modes(json!({}), &config, &[StreamMode::Values], tx)
+        .await
+        .unwrap();
+
+    let events = collect_core_events(rx).await;
+
+    let states: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            CoreStreamEvent::Values { state } => Some(state.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(states.len(), 3);
+    assert_eq!(states[0]["count"], json!(1));
+    assert_eq!(states[1]["count"], json!(2));
+    assert_eq!(states[2]["count"], json!(3));
+}
+
+#[tokio::test]
+async fn test_stream_with_modes_graph_complete_always_sent() {
+    let graph = build_ab_graph();
+    let config = default_config();
+    let (tx, rx) = mpsc::channel(64);
+
+    graph
+        .stream_with_modes(json!({}), &config, &[StreamMode::Debug], tx)
+        .await
+        .unwrap();
+
+    let events = collect_core_events(rx).await;
+
+    // GraphComplete is always sent regardless of mode
+    let complete_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreStreamEvent::GraphComplete { .. }))
+        .count();
+    assert_eq!(complete_count, 1);
+}

@@ -8,6 +8,7 @@ use ayas_core::error::{AyasError, GraphError, ModelError};
 #[derive(Debug)]
 pub enum AppError {
     MissingApiKey(String),
+    BadRequest(String),
     Ayas(AyasError),
     Internal(String),
     NotFound(String),
@@ -26,6 +27,7 @@ impl IntoResponse for AppError {
                 StatusCode::BAD_REQUEST,
                 format!("Missing API key for {provider}"),
             ),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Ayas(AyasError::Model(ModelError::Auth(msg))) => {
                 (StatusCode::UNAUTHORIZED, msg.clone())
             }

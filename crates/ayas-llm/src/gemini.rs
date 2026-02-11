@@ -1,11 +1,16 @@
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use ayas_core::error::{AyasError, ModelError, Result};
 use ayas_core::message::{
     AIContent, ContentPart, ContentSource, Message, MessageContent, ToolCall, UsageMetadata,
 };
-use ayas_core::model::{CallOptions, ChatModel, ChatResult};
+use ayas_core::model::{CallOptions, ChatModel, ChatResult, ChatStreamEvent};
+
+use crate::sse::sse_data_stream;
 
 // ---------------------------------------------------------------------------
 // Gemini API request types
@@ -366,6 +371,124 @@ impl ChatModel for GeminiChatModel {
     fn model_name(&self) -> &str {
         &self.model_id
     }
+
+    async fn stream(
+        &self,
+        messages: &[Message],
+        options: &CallOptions,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent>> + Send>>> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+            self.model_id, self.api_key
+        );
+
+        let request_body = self.build_request(messages, options);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AyasError::Model(ModelError::ApiRequest(e.to_string())))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read response body".into());
+            return Err(AyasError::Model(
+                if status.as_u16() == 401 || status.as_u16() == 403 {
+                    ModelError::Auth(body)
+                } else if status.as_u16() == 429 {
+                    ModelError::RateLimited {
+                        retry_after_secs: None,
+                    }
+                } else {
+                    ModelError::ApiRequest(format!("HTTP {status}: {body}"))
+                },
+            ));
+        }
+
+        let data_stream = sse_data_stream(response);
+
+        let event_stream = async_stream::stream! {
+            let mut data_stream = Box::pin(data_stream);
+            let mut last_usage: Option<UsageMetadata> = None;
+
+            while let Some(data) = data_stream.next().await {
+                let (events, usage) = parse_gemini_sse_data(&data);
+                for event in events {
+                    yield Ok(event);
+                }
+                if let Some(u) = usage {
+                    last_usage = Some(u);
+                }
+            }
+
+            // Emit usage at the end (Gemini sends cumulative usage per chunk)
+            if let Some(usage) = last_usage {
+                yield Ok(ChatStreamEvent::Usage(usage));
+            }
+            yield Ok(ChatStreamEvent::Done);
+        };
+
+        Ok(Box::pin(event_stream))
+    }
+}
+
+/// Parse a single Gemini SSE data line into stream events (for testing).
+///
+/// Returns `(events, optional_usage)`. Usage is tracked separately since
+/// Gemini sends cumulative usage in each chunk; the caller should emit
+/// only the final value.
+pub fn parse_gemini_sse_data(data: &str) -> (Vec<ChatStreamEvent>, Option<UsageMetadata>) {
+    let mut events = Vec::new();
+    let json: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return (events, None),
+    };
+
+    // Extract candidates
+    if let Some(candidates) = json["candidates"].as_array() {
+        if let Some(candidate) = candidates.first() {
+            if let Some(parts) = candidate["content"]["parts"].as_array() {
+                for part in parts {
+                    if let Some(text) = part["text"].as_str() {
+                        if !text.is_empty() {
+                            events.push(ChatStreamEvent::Token(text.to_string()));
+                        }
+                    }
+                    if let Some(fc) = part.get("functionCall") {
+                        let name = fc["name"].as_str().unwrap_or("").to_string();
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let args = fc.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                        events.push(ChatStreamEvent::ToolCallStart {
+                            id: id.clone(),
+                            name,
+                        });
+                        let args_str = serde_json::to_string(&args).unwrap_or_default();
+                        events.push(ChatStreamEvent::ToolCallDelta {
+                            id,
+                            arguments: args_str,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract usage
+    let usage = json.get("usageMetadata").and_then(|u| {
+        Some(UsageMetadata {
+            input_tokens: u["promptTokenCount"].as_u64()?,
+            output_tokens: u["candidatesTokenCount"].as_u64().unwrap_or(0),
+            total_tokens: u["totalTokenCount"].as_u64().unwrap_or(0),
+        })
+    });
+
+    (events, usage)
 }
 
 // ---------------------------------------------------------------------------
@@ -521,5 +644,69 @@ mod tests {
             .and_then(|p| p.text.clone())
             .unwrap_or_default();
         assert_eq!(text, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_sse_text_chunk() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}"#;
+        let (events, usage) = parse_gemini_sse_data(data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], ChatStreamEvent::Token("Hello".into()));
+        assert!(usage.is_some());
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 5);
+        assert_eq!(u.output_tokens, 1);
+    }
+
+    #[test]
+    fn parse_sse_function_call() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"calculator","args":{"expression":"2+2"}}}],"role":"model"}}]}"#;
+        let (events, _) = parse_gemini_sse_data(data);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ChatStreamEvent::ToolCallStart { name, .. } if name == "calculator"));
+        assert!(matches!(&events[1], ChatStreamEvent::ToolCallDelta { arguments, .. } if arguments.contains("expression")));
+    }
+
+    #[test]
+    fn parse_sse_empty_text_skipped() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}]}"#;
+        let (events, _) = parse_gemini_sse_data(data);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_multiple_text_chunks() {
+        let chunks = [
+            r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}"#,
+            r#"{"candidates":[{"content":{"parts":[{"text":" world!"}],"role":"model"}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}"#,
+        ];
+
+        let mut all_events = Vec::new();
+        let mut last_usage = None;
+
+        for chunk in &chunks {
+            let (events, usage) = parse_gemini_sse_data(chunk);
+            all_events.extend(events);
+            if usage.is_some() {
+                last_usage = usage;
+            }
+        }
+
+        assert_eq!(all_events.len(), 2);
+        assert_eq!(all_events[0], ChatStreamEvent::Token("Hello".into()));
+        assert_eq!(all_events[1], ChatStreamEvent::Token(" world!".into()));
+        let u = last_usage.unwrap();
+        assert_eq!(u.total_tokens, 8);
+    }
+
+    #[test]
+    fn parse_sse_invalid_json() {
+        let (events, usage) = parse_gemini_sse_data("not json");
+        assert!(events.is_empty());
+        assert!(usage.is_none());
     }
 }

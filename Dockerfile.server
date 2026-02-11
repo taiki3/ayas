@@ -1,0 +1,37 @@
+# --- Build stage ---
+FROM rust:1.93-bookworm AS builder
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY}
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+
+RUN cargo build --release -p ayas-server
+
+# --- Runtime stage ---
+FROM debian:bookworm-slim
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY}
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Clear proxy from runtime (not needed at runtime)
+ENV HTTP_PROXY="" HTTPS_PROXY="" NO_PROXY=""
+
+COPY --from=builder /app/target/release/ayas-server /usr/local/bin/ayas-server
+
+ENV PORT=3001
+EXPOSE 3001
+
+CMD ["ayas-server"]

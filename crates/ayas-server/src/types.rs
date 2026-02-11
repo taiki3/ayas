@@ -121,6 +121,20 @@ pub struct GraphExecuteRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GraphStreamRequest {
+    pub nodes: Vec<GraphNodeDto>,
+    pub edges: Vec<GraphEdgeDto>,
+    #[serde(default)]
+    pub channels: Vec<GraphChannelDto>,
+    #[serde(default)]
+    pub input: serde_json::Value,
+    /// Comma-separated stream modes: values, updates, messages, debug.
+    /// Defaults to "values" if omitted.
+    #[serde(default)]
+    pub stream_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct GraphGenerateRequest {
     pub prompt: String,
     pub provider: Provider,

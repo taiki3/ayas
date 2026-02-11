@@ -43,9 +43,24 @@ impl SmithQuery {
         format!("{}/*.parquet", dir.display())
     }
 
+    /// Check whether any parquet files exist for the given project.
+    /// Returns false when the directory doesn't exist or contains no `.parquet` files.
+    fn has_parquet_files(&self, project: &str) -> bool {
+        let dir = self.base_dir.join(project);
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "parquet")),
+            Err(_) => false,
+        }
+    }
+
     /// List runs matching the given filter.
     pub fn list_runs(&self, filter: &RunFilter) -> Result<Vec<Run>> {
-        let project = filter.project.as_deref().unwrap_or("*");
+        let project = filter.project.as_deref().unwrap_or("default");
+        if !self.has_parquet_files(project) {
+            return Ok(Vec::new());
+        }
         let glob = self.parquet_glob(project);
 
         let mut conditions = Vec::new();
@@ -126,6 +141,9 @@ impl SmithQuery {
 
     /// Get a single run by its ID (deduplicated: prefers completed over running).
     pub fn get_run(&self, run_id: Uuid, project: &str) -> Result<Option<Run>> {
+        if !self.has_parquet_files(project) {
+            return Ok(None);
+        }
         let glob = self.parquet_glob(project);
         let sql = format!(
             "SELECT {SELECT_COLUMNS} FROM read_parquet('{glob}') \
@@ -169,7 +187,10 @@ impl SmithQuery {
 
     /// Get token usage summary for runs matching the filter.
     pub fn token_usage_summary(&self, filter: &RunFilter) -> Result<TokenUsageSummary> {
-        let project = filter.project.as_deref().unwrap_or("*");
+        let project = filter.project.as_deref().unwrap_or("default");
+        if !self.has_parquet_files(project) {
+            return Ok(TokenUsageSummary::default());
+        }
         let glob = self.parquet_glob(project);
 
         let mut conditions = vec!["run_type = 'llm'".to_string()];
@@ -209,7 +230,10 @@ impl SmithQuery {
 
     /// Get latency percentiles for runs matching the filter.
     pub fn latency_percentiles(&self, filter: &RunFilter) -> Result<LatencyStats> {
-        let project = filter.project.as_deref().unwrap_or("*");
+        let project = filter.project.as_deref().unwrap_or("default");
+        if !self.has_parquet_files(project) {
+            return Ok(LatencyStats::default());
+        }
         let glob = self.parquet_glob(project);
 
         let mut conditions: Vec<String> = vec!["latency_ms IS NOT NULL".into()];

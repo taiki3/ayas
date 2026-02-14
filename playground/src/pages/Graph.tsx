@@ -123,6 +123,7 @@ const MODEL_OPTIONS: Record<string, { id: string; label: string }[]> = {
     { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
     { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (Preview)' },
     { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro (Preview)' },
+    { id: 'deep-research-pro-preview-12-2025', label: 'Deep Research Pro' },
   ],
   claude: [
     { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },

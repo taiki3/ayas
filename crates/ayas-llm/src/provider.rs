@@ -19,6 +19,7 @@ impl Provider {
                 "gemini-2.5-pro",
                 "gemini-3-flash-preview",
                 "gemini-3-pro-preview",
+                "deep-research-pro-preview-12-2025",
             ],
             Provider::Claude => &[
                 "claude-opus-4-6",

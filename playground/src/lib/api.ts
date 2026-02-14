@@ -90,6 +90,32 @@ export interface ResearchSseEvent {
   interaction_id?: string;
 }
 
+// --- Env keys cache ---
+
+export interface EnvKeys {
+  gemini: boolean;
+  claude: boolean;
+  openai: boolean;
+}
+
+let envKeysCache: EnvKeys | null = null;
+
+export async function fetchEnvKeys(): Promise<EnvKeys> {
+  if (envKeysCache) return envKeysCache;
+  try {
+    const res = await fetch('/api/env-keys', { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      envKeysCache = await res.json();
+      return envKeysCache!;
+    }
+  } catch { /* ignore */ }
+  return { gemini: false, claude: false, openai: false };
+}
+
+export function getCachedEnvKeys(): EnvKeys | null {
+  return envKeysCache;
+}
+
 // --- Helpers ---
 
 const API_KEY_HEADERS: Record<Provider, string> = {
@@ -111,15 +137,22 @@ export function getApiKey(provider: Provider): string | undefined {
   return keys[provider];
 }
 
+/** Returns true if the provider key is available (either from env or localStorage). */
+export function hasApiKey(provider: Provider): boolean {
+  if (envKeysCache?.[provider]) return true;
+  return !!getApiKey(provider);
+}
+
 function buildHeaders(provider: Provider): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  // If env var provides the key on the server side, no header needed
+  if (envKeysCache?.[provider]) return headers;
   const apiKey = getApiKey(provider);
   if (!apiKey) {
     throw new Error(`API key for ${provider} is not set. Please configure it in API Keys settings.`);
   }
-  return {
-    'Content-Type': 'application/json',
-    [API_KEY_HEADERS[provider]]: apiKey,
-  };
+  headers[API_KEY_HEADERS[provider]] = apiKey;
+  return headers;
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -240,10 +273,17 @@ export function graphInvokeStream(
   onEvent: (event: GraphSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // Build headers with all available API keys for LLM nodes
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  for (const provider of ['gemini', 'claude', 'openai'] as Provider[]) {
+    if (envKeysCache?.[provider]) continue;
+    const key = getApiKey(provider);
+    if (key) headers[API_KEY_HEADERS[provider]] = key;
+  }
   return streamSSE(
     '/api/graph/invoke-stream',
     { nodes, edges, channels, input },
-    { 'Content-Type': 'application/json' },
+    headers,
     onEvent,
     signal,
   );
@@ -435,20 +475,14 @@ export function pipelineInvokeStream(
   onEvent: (event: PipelineSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const apiKey = getApiKey('gemini');
-  if (!apiKey) {
+  if (!hasApiKey('gemini')) {
     throw new Error('Gemini API key is required for Pipeline. Please configure it in API Keys settings.');
   }
-  return streamSSE(
-    '/api/pipeline/hypothesis',
-    params,
-    {
-      'Content-Type': 'application/json',
-      'X-Gemini-Key': apiKey,
-    },
-    onEvent,
-    signal,
-  );
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (!envKeysCache?.gemini) {
+    headers['X-Gemini-Key'] = getApiKey('gemini')!;
+  }
+  return streamSSE('/api/pipeline/hypothesis', params, headers, onEvent, signal);
 }
 
 // --- Research API ---
@@ -460,9 +494,12 @@ export function researchInvokeStream(
   onEvent: (event: ResearchSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const apiKey = getApiKey('gemini');
-  if (!apiKey) {
+  if (!hasApiKey('gemini')) {
     throw new Error('Gemini API key is required for Research. Please configure it in API Keys settings.');
+  }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (!envKeysCache?.gemini) {
+    headers['X-Gemini-Key'] = getApiKey('gemini')!;
   }
   return streamSSE(
     '/api/research/invoke',
@@ -471,10 +508,7 @@ export function researchInvokeStream(
       agent: agent || undefined,
       previous_interaction_id: previousInteractionId || undefined,
     },
-    {
-      'Content-Type': 'application/json',
-      'X-Gemini-Key': apiKey,
-    },
+    headers,
     onEvent,
     signal,
   );

@@ -704,6 +704,7 @@ dependencies = [
  "http-body-util",
  "meval",
  "reqwest",
+ "rhai",
  "serde",
  "serde_json",
  "tempfile",

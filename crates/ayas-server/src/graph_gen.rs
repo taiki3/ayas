@@ -19,27 +19,57 @@ pub fn graph_system_prompt() -> String {
 The graph has these components:
 
 **Nodes** (types: "llm", "transform", "conditional", "passthrough"):
-- "llm": Calls a language model. Config may include "prompt".
-- "transform": Applies a data transformation. Config may include "expression".
-- "conditional": Routes based on state. Used with conditional edges.
-- "passthrough": Passes state through unchanged.
+
+- "llm": Calls a language model with a system prompt. Reads input from a state channel and writes output to a state channel.
+  Config schema:
+  {
+    "prompt": "System prompt for the LLM",
+    "provider": "gemini" | "claude" | "openai",
+    "model": "gemini-2.0-flash",
+    "temperature": 0.7,
+    "input_channel": "value",
+    "output_channel": "value"
+  }
+  - "prompt" (required): The system instruction for the LLM.
+  - "provider" (default: "gemini"): Which LLM provider to use.
+  - "model" (default: "gemini-2.0-flash"): Model identifier.
+  - "temperature" (default: 0.7): Sampling temperature (0-2).
+  - "input_channel" (default: "value"): State key to read user input from.
+  - "output_channel" (default: "value"): State key to write LLM response to.
+
+- "transform": Evaluates a Rhai scripting expression against the state.
+  Config schema:
+  {
+    "expression": "state.value.len()",
+    "output_channel": "count"
+  }
+  - "expression" (required): A Rhai expression. The full state is available as the "state" variable.
+  - "output_channel" (default: "value"): State key to write the result to.
+
+- "conditional": Routes based on state. Used with conditional edges. No config needed.
+
+- "passthrough": Passes state through unchanged. No config needed.
 
 Note: "start" and "end" are implicit — do NOT include them as nodes.
 
 **Edges**: Connect nodes. "from"/"to" fields. Use "start" and "end" as virtual endpoints.
 - Every graph must have at least one edge from "start" and one edge to "end".
-- Optional "condition" field for conditional routing (references a state key).
+- Optional "condition" field for conditional routing (references a state key that is truthy).
 
 **Channels**: Define state keys. Types: "LastValue" (single value) or "Append" (list).
 - At minimum, include a "value" channel of type "LastValue".
+- When using custom input_channel / output_channel in LLM nodes, add corresponding channels.
 
 Respond with ONLY valid JSON (no markdown fencing, no explanation). The JSON must have exactly these top-level keys: "nodes", "edges", "channels".
 
 Example 1 — Simple Q&A:
-{"nodes":[{"id":"qa_llm","type":"llm","label":"Q&A Model"}],"edges":[{"from":"start","to":"qa_llm"},{"from":"qa_llm","to":"end"}],"channels":[{"key":"value","type":"LastValue"}]}
+{"nodes":[{"id":"qa_llm","type":"llm","label":"Q&A Model","config":{"prompt":"Answer questions concisely","provider":"gemini","model":"gemini-2.0-flash"}}],"edges":[{"from":"start","to":"qa_llm"},{"from":"qa_llm","to":"end"}],"channels":[{"key":"value","type":"LastValue"}]}
 
 Example 2 — Intent routing:
-{"nodes":[{"id":"classifier","type":"llm","label":"Intent Classifier"},{"id":"router","type":"conditional","label":"Route by Intent"},{"id":"faq_handler","type":"llm","label":"FAQ Handler"},{"id":"support_handler","type":"llm","label":"Support Handler"}],"edges":[{"from":"start","to":"classifier"},{"from":"classifier","to":"router"},{"from":"router","to":"faq_handler","condition":"is_faq"},{"from":"router","to":"support_handler","condition":"is_support"},{"from":"faq_handler","to":"end"},{"from":"support_handler","to":"end"}],"channels":[{"key":"value","type":"LastValue"},{"key":"is_faq","type":"LastValue"},{"key":"is_support","type":"LastValue"}]}"#.to_string()
+{"nodes":[{"id":"classifier","type":"llm","label":"Intent Classifier","config":{"prompt":"Classify the user intent. Set is_faq=true in your response if it's a FAQ question, otherwise set is_support=true.","provider":"gemini","model":"gemini-2.0-flash","output_channel":"classification"}},{"id":"router","type":"conditional","label":"Route by Intent"},{"id":"faq_handler","type":"llm","label":"FAQ Handler","config":{"prompt":"Answer this FAQ question helpfully","input_channel":"value","output_channel":"value"}},{"id":"support_handler","type":"llm","label":"Support Handler","config":{"prompt":"Handle this support request professionally","input_channel":"value","output_channel":"value"}}],"edges":[{"from":"start","to":"classifier"},{"from":"classifier","to":"router"},{"from":"router","to":"faq_handler","condition":"is_faq"},{"from":"router","to":"support_handler","condition":"is_support"},{"from":"faq_handler","to":"end"},{"from":"support_handler","to":"end"}],"channels":[{"key":"value","type":"LastValue"},{"key":"classification","type":"LastValue"},{"key":"is_faq","type":"LastValue"},{"key":"is_support","type":"LastValue"}]}
+
+Example 3 — Multi-step pipeline with transform:
+{"nodes":[{"id":"preprocessor","type":"transform","label":"Preprocess","config":{"expression":"state.value.trim()","output_channel":"value"}},{"id":"analyzer","type":"llm","label":"Analyze","config":{"prompt":"Analyze the following text and provide key insights","provider":"gemini","model":"gemini-2.0-flash","input_channel":"value","output_channel":"analysis"}},{"id":"formatter","type":"transform","label":"Format Output","config":{"expression":"\"Analysis: \" + state.analysis","output_channel":"value"}}],"edges":[{"from":"start","to":"preprocessor"},{"from":"preprocessor","to":"analyzer"},{"from":"analyzer","to":"formatter"},{"from":"formatter","to":"end"}],"channels":[{"key":"value","type":"LastValue"},{"key":"analysis","type":"LastValue"}]}"#.to_string()
 }
 
 /// Parse the LLM response text into a ParsedGraph.

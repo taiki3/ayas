@@ -1,21 +1,47 @@
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use ayas_checkpoint::prelude::interrupt_output;
 use ayas_core::error::Result;
+use ayas_core::message::Message;
+use ayas_core::model::{CallOptions, ChatModel};
 use ayas_graph::channel::ChannelSpec;
 use ayas_graph::compiled::CompiledStateGraph;
 use ayas_graph::constants::END;
 use ayas_graph::edge::ConditionalEdge;
 use ayas_graph::node::NodeFn;
 use ayas_graph::state_graph::StateGraph;
+use ayas_llm::provider::Provider;
 
+use crate::extractors::ApiKeys;
 use crate::types::{GraphChannelDto, GraphEdgeDto, GraphNodeDto};
 
-/// Convert frontend graph DTOs into a compiled StateGraph.
+/// Factory function type for creating ChatModel instances in graph context.
+pub type GraphModelFactory =
+    Arc<dyn Fn(&Provider, String, String) -> Box<dyn ChatModel> + Send + Sync>;
+
+/// Context for building a graph with real LLM execution.
+pub struct GraphBuildContext {
+    pub factory: GraphModelFactory,
+    pub api_keys: ApiKeys,
+}
+
+/// Convert frontend graph DTOs into a compiled StateGraph (backward-compatible).
 pub fn convert_to_state_graph(
     nodes: &[GraphNodeDto],
     edges: &[GraphEdgeDto],
     channels: &[GraphChannelDto],
+) -> Result<CompiledStateGraph> {
+    convert_to_state_graph_with_context(nodes, edges, channels, None)
+}
+
+/// Convert frontend graph DTOs into a compiled StateGraph, optionally with LLM execution context.
+pub fn convert_to_state_graph_with_context(
+    nodes: &[GraphNodeDto],
+    edges: &[GraphEdgeDto],
+    channels: &[GraphChannelDto],
+    context: Option<GraphBuildContext>,
 ) -> Result<CompiledStateGraph> {
     let mut graph = StateGraph::new();
 
@@ -60,7 +86,6 @@ pub fn convert_to_state_graph(
         .any(|e| e.from == "start" && e.to == "end");
 
     if direct_start_end && entry_node.is_none() {
-        // Create a synthetic passthrough node for start→end
         let synthetic = NodeFn::new("__passthrough__", |state: Value, _cfg| async move {
             Ok(state)
         });
@@ -69,6 +94,9 @@ pub fn convert_to_state_graph(
         finish_nodes.push("__passthrough__".to_string());
     }
 
+    // Wrap context in Arc so it can be shared across node closures
+    let ctx = context.map(Arc::new);
+
     // Add nodes (skip start/end - they are virtual)
     for node in nodes {
         match node.node_type.as_str() {
@@ -76,20 +104,13 @@ pub fn convert_to_state_graph(
             "llm" => {
                 let config = node.config.clone().unwrap_or(Value::Null);
                 let id = node.id.clone();
+                let ctx = ctx.clone();
+
                 let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
                     let config = config.clone();
+                    let ctx = ctx.clone();
                     Box::pin(async move {
-                        let mut state = state;
-                        if let Value::Object(ref mut map) = state
-                            && let Some(prompt) =
-                                config.get("prompt").and_then(|v| v.as_str())
-                        {
-                            map.insert(
-                                "last_prompt".to_string(),
-                                Value::String(prompt.to_string()),
-                            );
-                        }
-                        Ok(state)
+                        build_llm_node(state, &config, ctx.as_deref()).await
                     })
                 });
                 graph.add_node(node_fn)?;
@@ -99,19 +120,7 @@ pub fn convert_to_state_graph(
                 let id = node.id.clone();
                 let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
                     let config = config.clone();
-                    Box::pin(async move {
-                        let mut state = state;
-                        if let Value::Object(ref mut map) = state
-                            && let Some(expr) =
-                                config.get("expression").and_then(|v| v.as_str())
-                        {
-                            map.insert(
-                                "transform_applied".to_string(),
-                                Value::String(expr.to_string()),
-                            );
-                        }
-                        Ok(state)
-                    })
+                    Box::pin(async move { build_transform_node(state, &config) })
                 });
                 graph.add_node(node_fn)?;
             }
@@ -168,7 +177,6 @@ pub fn convert_to_state_graph(
         }
 
         if let Some(condition) = &edge.condition {
-            // Conditional edge: route based on a state field
             let condition = condition.clone();
             let to_target = edge.to.clone();
 
@@ -192,6 +200,147 @@ pub fn convert_to_state_graph(
     }
 
     graph.compile()
+}
+
+/// Build LLM node logic: calls a real ChatModel if context is available, otherwise dummy.
+async fn build_llm_node(
+    state: Value,
+    config: &Value,
+    context: Option<&GraphBuildContext>,
+) -> Result<Value> {
+    let prompt = config
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let input_channel = config
+        .get("input_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+    let output_channel = config
+        .get("output_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+
+    let Some(ctx) = context else {
+        // No context: dummy behavior (backward-compatible)
+        let mut state = state;
+        if let Value::Object(ref mut map) = state {
+            if !prompt.is_empty() {
+                map.insert(
+                    "last_prompt".to_string(),
+                    Value::String(prompt.to_string()),
+                );
+            }
+        }
+        return Ok(state);
+    };
+
+    // Resolve provider and model from config
+    let provider_str = config
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gemini");
+    let provider = match provider_str {
+        "claude" | "anthropic" => Provider::Claude,
+        "openai" => Provider::OpenAI,
+        _ => Provider::Gemini,
+    };
+    let model_id = config
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gemini-2.0-flash")
+        .to_string();
+
+    let api_key = ctx.api_keys.get_key_for(&provider).map_err(|e| {
+        ayas_core::error::AyasError::Other(format!("API key error: {e:?}"))
+    })?;
+
+    let model = (ctx.factory)(&provider, api_key, model_id);
+
+    // Read user input from state
+    let user_input = match state.get(input_channel) {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+
+    let mut messages = Vec::new();
+    if !prompt.is_empty() {
+        messages.push(Message::system(prompt));
+    }
+    messages.push(Message::user(user_input.as_str()));
+
+    let temperature = config
+        .get("temperature")
+        .and_then(|v| v.as_f64());
+    let options = CallOptions {
+        temperature,
+        ..Default::default()
+    };
+
+    let result = model.generate(&messages, &options).await?;
+    let response_text = result.message.content().to_string();
+
+    let mut state = state;
+    if let Value::Object(ref mut map) = state {
+        map.insert(output_channel.to_string(), Value::String(response_text));
+    }
+
+    Ok(state)
+}
+
+/// Build Transform node logic: evaluates a Rhai expression against the state.
+fn build_transform_node(state: Value, config: &Value) -> Result<Value> {
+    let Some(expression) = config.get("expression").and_then(|v| v.as_str()) else {
+        // No expression: dummy behavior (backward-compatible)
+        let mut state = state;
+        if let Value::Object(ref mut map) = state {
+            map.insert(
+                "transform_applied".to_string(),
+                Value::String("(no expression)".to_string()),
+            );
+        }
+        return Ok(state);
+    };
+
+    let output_channel = config
+        .get("output_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+
+    // Rhai Engine is !Sync → create fresh per evaluation
+    let mut engine = rhai::Engine::new();
+    engine.set_max_operations(10_000);
+    engine.set_max_call_levels(8);
+    engine.set_max_expr_depths(32, 16);
+    engine.set_max_string_size(4096);
+    engine.set_max_array_size(256);
+    engine.set_max_map_size(128);
+
+    let dynamic_state = rhai::serde::to_dynamic(&state).map_err(|e| {
+        ayas_core::error::AyasError::Other(format!(
+            "Failed to convert state to Rhai dynamic: {e}"
+        ))
+    })?;
+
+    let mut scope = rhai::Scope::new();
+    scope.push_dynamic("state", dynamic_state);
+
+    let result: rhai::Dynamic = engine.eval_with_scope(&mut scope, expression).map_err(|e| {
+        ayas_core::error::AyasError::Other(format!("Rhai expression error: {e}"))
+    })?;
+
+    // Convert Rhai result back to serde_json::Value
+    let result_value: Value = rhai::serde::from_dynamic(&result).unwrap_or_else(|_| {
+        Value::String(result.to_string())
+    });
+
+    let mut state = state;
+    if let Value::Object(ref mut map) = state {
+        map.insert(output_channel.to_string(), result_value);
+    }
+
+    Ok(state)
 }
 
 /// Validate a graph structure without compiling.
@@ -258,6 +407,7 @@ pub fn validate_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ayas_core::runnable::Runnable;
     use crate::types::{GraphChannelDto, GraphEdgeDto, GraphNodeDto};
 
     fn node(id: &str, node_type: &str) -> GraphNodeDto {
@@ -404,5 +554,198 @@ mod tests {
         assert!(result.is_ok());
         let compiled = result.unwrap();
         assert_eq!(compiled.node_names().len(), 2);
+    }
+
+    // --- New tests for LLM node with context ---
+
+    use async_trait::async_trait;
+    use ayas_core::message::AIContent;
+    use ayas_core::model::ChatResult;
+
+    struct MockChatModel {
+        response: String,
+    }
+
+    #[async_trait]
+    impl ChatModel for MockChatModel {
+        async fn generate(
+            &self,
+            _messages: &[ayas_core::message::Message],
+            _options: &CallOptions,
+        ) -> ayas_core::error::Result<ChatResult> {
+            Ok(ChatResult {
+                message: Message::AI(AIContent {
+                    content: self.response.clone(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                }),
+                usage: None,
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-model"
+        }
+    }
+
+    fn mock_factory(response: &str) -> GraphModelFactory {
+        let resp = response.to_string();
+        Arc::new(move |_provider, _key, _model| {
+            Box::new(MockChatModel {
+                response: resp.clone(),
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_llm_node_with_mock_model() {
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "You are a helpful assistant",
+            "provider": "gemini",
+            "model": "gemini-2.0-flash"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("Hello from LLM!"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "What is Rust?"});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["value"], "Hello from LLM!");
+    }
+
+    #[tokio::test]
+    async fn test_llm_node_without_context_backward_compat() {
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "Hello"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("last_prompt", "LastValue"),
+        ];
+
+        // No context → dummy behavior
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, None,
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test", "last_prompt": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        // Dummy: stores last_prompt
+        assert_eq!(output["last_prompt"], "Hello");
+        assert_eq!(output["value"], "test");
+    }
+
+    #[tokio::test]
+    async fn test_llm_node_custom_channels() {
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "Summarize",
+            "provider": "gemini",
+            "model": "gemini-2.0-flash",
+            "input_channel": "input_text",
+            "output_channel": "result"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![
+            channel("input_text", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("Summary result"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"input_text": "Long text...", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "Summary result");
+        assert_eq!(output["input_text"], "Long text...");
+    }
+
+    #[tokio::test]
+    async fn test_transform_node_rhai_expression() {
+        let mut n = node("transform_1", "transform");
+        n.config = Some(json!({
+            "expression": "state.value + \" world\"",
+            "output_channel": "value"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "transform_1"), edge("transform_1", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "hello"});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["value"], "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_transform_node_numeric_expression() {
+        let mut n = node("calc", "transform");
+        n.config = Some(json!({
+            "expression": "state.count + 10",
+            "output_channel": "count"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "calc"), edge("calc", "end")];
+        let channels = vec![channel("count", "LastValue")];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"count": 5});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["count"], 15);
+    }
+
+    #[tokio::test]
+    async fn test_transform_node_no_expression_backward_compat() {
+        let n = node("transform_1", "transform");
+        let nodes = vec![n];
+        let edges = vec![edge("start", "transform_1"), edge("transform_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("transform_applied", "LastValue"),
+        ];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test", "transform_applied": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["value"], "test");
+        assert_eq!(output["transform_applied"], "(no expression)");
     }
 }

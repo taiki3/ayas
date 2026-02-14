@@ -30,6 +30,7 @@ chrono = { workspace = true }
 ayas-smith = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
+rhai = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

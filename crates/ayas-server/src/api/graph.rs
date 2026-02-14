@@ -17,7 +17,10 @@ use ayas_llm::provider::Provider;
 
 use crate::error::AppError;
 use crate::extractors::ApiKeys;
-use crate::graph_convert::{convert_to_state_graph, validate_graph};
+use crate::graph_convert::{
+    GraphBuildContext, GraphModelFactory, convert_to_state_graph, convert_to_state_graph_with_context,
+    validate_graph,
+};
 use crate::graph_gen;
 use crate::sse::{sse_done, sse_event};
 use crate::tracing_middleware::{TracingContext, is_tracing_requested};
@@ -26,10 +29,6 @@ use crate::types::{
     GraphGenerateResponse, GraphNodeDto, GraphStreamRequest, GraphValidateRequest,
     GraphValidateResponse,
 };
-
-/// Factory function type for creating ChatModel instances.
-pub type GraphModelFactory =
-    Arc<dyn Fn(&Provider, String, String) -> Box<dyn ChatModel> + Send + Sync>;
 
 /// Create the default factory that delegates to ayas_llm::factory.
 pub fn default_graph_factory() -> GraphModelFactory {
@@ -80,6 +79,8 @@ async fn graph_validate(Json(req): Json<GraphValidateRequest>) -> Json<GraphVali
 }
 
 async fn graph_execute(
+    State(factory): State<GraphModelFactory>,
+    api_keys: ApiKeys,
     headers: axum::http::HeaderMap,
     Json(req): Json<GraphExecuteRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
@@ -97,7 +98,10 @@ async fn graph_execute(
         None
     };
 
-    let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
+    let context = GraphBuildContext { factory, api_keys };
+    let compiled = convert_to_state_graph_with_context(
+        &req.nodes, &req.edges, &req.channels, Some(context),
+    )?;
     let config = RunnableConfig::default();
 
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
@@ -126,7 +130,7 @@ async fn graph_execute(
                 }));
             }
 
-            // Record trace (non-blocking — submit_run sends to mpsc channel)
+            // Record trace (non-blocking)
             if let (Some(ctx), Some(input)) = (&tracing_ctx, &trace_input) {
                 ctx.record_graph_run("graph-execute", input, &output, None);
             }
@@ -156,6 +160,8 @@ async fn graph_execute(
 }
 
 async fn graph_invoke_stream(
+    State(factory): State<GraphModelFactory>,
+    api_keys: ApiKeys,
     headers: axum::http::HeaderMap,
     Json(req): Json<GraphExecuteRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
@@ -172,7 +178,10 @@ async fn graph_invoke_stream(
         None
     };
 
-    let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
+    let context = GraphBuildContext { factory, api_keys };
+    let compiled = convert_to_state_graph_with_context(
+        &req.nodes, &req.edges, &req.channels, Some(context),
+    )?;
     let config = RunnableConfig::default();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
@@ -222,10 +231,9 @@ async fn graph_invoke_stream(
 }
 
 /// Multi-mode streaming endpoint.
-///
-/// The request body includes `stream_mode` (comma-separated), e.g. `"values,debug"`.
-/// SSE events use the `event:` field to indicate the stream mode.
 async fn graph_stream(
+    State(factory): State<GraphModelFactory>,
+    api_keys: ApiKeys,
     Json(req): Json<GraphStreamRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     use ayas_core::stream::{StreamEvent as CoreEvent, parse_stream_modes};
@@ -233,7 +241,10 @@ async fn graph_stream(
     let modes = parse_stream_modes(req.stream_mode.as_deref().unwrap_or(""))
         .map_err(|e| AppError::BadRequest(e))?;
 
-    let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
+    let context = GraphBuildContext { factory, api_keys };
+    let compiled = convert_to_state_graph_with_context(
+        &req.nodes, &req.edges, &req.channels, Some(context),
+    )?;
     let config = RunnableConfig::default();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<CoreEvent>(64);
@@ -736,5 +747,87 @@ mod tests {
             "Expected graph_complete event, got: {:?}",
             events
         );
+    }
+
+    #[tokio::test]
+    async fn test_graph_execute_with_mock_llm() {
+        let (factory, call_count) = mock_graph_factory("LLM response text");
+        let app = Router::new().nest("/api", routes_with_factory(factory));
+
+        let body = serde_json::json!({
+            "nodes": [{"id": "llm_1", "type": "llm", "config": {
+                "prompt": "Summarize",
+                "provider": "gemini",
+                "model": "gemini-2.0-flash"
+            }}],
+            "edges": [
+                {"from": "start", "to": "llm_1"},
+                {"from": "llm_1", "to": "end"}
+            ],
+            "channels": [{"key": "value", "type": "LastValue"}],
+            "input": {"value": "some text"}
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/graph/execute")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Gemini-Key", "test-key")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let events = parse_sse_events(&bytes);
+        let complete = events.iter().find(|e| e["type"] == "complete");
+        assert!(complete.is_some(), "Expected complete event, got: {:?}", events);
+        assert_eq!(complete.unwrap()["output"]["value"], "LLM response text");
+    }
+
+    #[tokio::test]
+    async fn test_graph_invoke_stream_with_mock_llm() {
+        let (factory, _call_count) = mock_graph_factory("Streamed LLM output");
+        let app = Router::new().nest("/api", routes_with_factory(factory));
+
+        let body = serde_json::json!({
+            "nodes": [{"id": "llm_1", "type": "llm", "config": {
+                "prompt": "Translate",
+                "provider": "gemini",
+                "model": "gemini-2.0-flash"
+            }}],
+            "edges": [
+                {"from": "start", "to": "llm_1"},
+                {"from": "llm_1", "to": "end"}
+            ],
+            "channels": [{"key": "value", "type": "LastValue"}],
+            "input": {"value": "hello"}
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/graph/invoke-stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Gemini-Key", "test-key")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let events = parse_sse_events(&bytes);
+        let complete = events.iter().find(|e| e["type"] == "graph_complete");
+        assert!(complete.is_some(), "Expected graph_complete, got: {:?}", events);
+        // LLM node should have written mock response to "value" channel
+        assert_eq!(complete.unwrap()["output"]["value"], "Streamed LLM output");
     }
 }

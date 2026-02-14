@@ -10,10 +10,16 @@ services:
     environment:
       - PORT=3001
       - AYAS_SMITH_DIR=/data/smith
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+      - http_proxy=${HTTP_PROXY:-}
+      - https_proxy=${HTTPS_PROXY:-}
+      - no_proxy=${NO_PROXY:-}
     volumes:
       - smith-data:/data/smith
-    expose:
-      - "3001"
+    ports:
+      - "13001:3001"
 
   playground:
     build:

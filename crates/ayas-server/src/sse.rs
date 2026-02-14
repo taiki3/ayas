@@ -1,15 +1,22 @@
+use std::time::Duration;
+
 use axum::response::sse::{Event, KeepAlive};
 use futures::Stream;
 use serde::Serialize;
 
 /// Create an SSE response from a stream of events with keep-alive.
+/// Uses a 5-second interval to prevent proxy/network timeouts during long operations.
 pub fn sse_response<S>(
     stream: S,
 ) -> axum::response::Sse<axum::response::sse::KeepAliveStream<S>>
 where
     S: Stream<Item = Result<Event, std::convert::Infallible>> + Send + 'static,
 {
-    axum::response::Sse::new(stream).keep_alive(KeepAlive::default())
+    axum::response::Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(5))
+            .text("keepalive"),
+    )
 }
 
 /// Create an SSE Event from a serializable value.

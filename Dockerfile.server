@@ -11,6 +11,7 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
+COPY demo demo
 
 RUN cargo build --release -p ayas-server
 
@@ -26,7 +27,7 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Clear proxy from runtime (not needed at runtime)
+# Clear build-time proxy; runtime proxy is injected via docker-compose environment
 ENV HTTP_PROXY="" HTTPS_PROXY="" NO_PROXY=""
 
 COPY --from=builder /app/target/release/ayas-server /usr/local/bin/ayas-server

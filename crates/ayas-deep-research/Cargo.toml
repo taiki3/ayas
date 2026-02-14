@@ -15,6 +15,7 @@ reqwest = { workspace = true }
 bytes = "1"
 futures = { workspace = true }
 tokio-stream = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

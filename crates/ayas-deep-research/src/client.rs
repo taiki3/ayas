@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::Stream;
+use tracing::{info, warn};
 
 use ayas_core::error::{AyasError, Result};
 
@@ -26,15 +27,21 @@ pub trait InteractionsClient: Send + Sync {
         poll_interval: Duration,
     ) -> Result<Interaction> {
         let interaction = self.create(request).await?;
+        info!(id = %interaction.id, status = ?interaction.status, "Interaction created");
         let mut current = interaction;
+        let mut poll_count = 0u32;
 
         loop {
             match current.status {
-                InteractionStatus::Completed => return Ok(current),
+                InteractionStatus::Completed => {
+                    info!(id = %current.id, poll_count, "Interaction completed");
+                    return Ok(current);
+                }
                 InteractionStatus::Failed => {
                     let msg = current
                         .error
                         .unwrap_or_else(|| "unknown error".into());
+                    warn!(id = %current.id, poll_count, error = %msg, "Interaction failed");
                     return Err(AyasError::Other(format!(
                         "Interaction {} failed: {}",
                         current.id, msg
@@ -42,7 +49,19 @@ pub trait InteractionsClient: Send + Sync {
                 }
                 InteractionStatus::InProgress => {
                     tokio::time::sleep(poll_interval).await;
-                    current = self.get(&current.id).await?;
+                    poll_count += 1;
+                    match self.get(&current.id).await {
+                        Ok(updated) => {
+                            if poll_count % 12 == 0 {
+                                info!(id = %updated.id, poll_count, status = ?updated.status, "Polling...");
+                            }
+                            current = updated;
+                        }
+                        Err(e) => {
+                            warn!(id = %current.id, poll_count, error = %e, "Poll GET failed");
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }

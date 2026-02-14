@@ -136,6 +136,7 @@ impl Runnable for DeepResearchRunnable {
         _config: &RunnableConfig,
     ) -> Result<Self::Output> {
         let agent = input.agent.unwrap_or_else(|| self.default_agent.clone());
+        tracing::info!(agent = %agent, attachments = input.attachments.len(), "DeepResearch invoke start");
 
         let interaction_input = if input.attachments.is_empty() {
             InteractionInput::Text(input.query)
@@ -157,6 +158,7 @@ impl Runnable for DeepResearchRunnable {
             request = request.with_previous_interaction_id(prev_id);
         }
 
+        tracing::info!("Calling create_and_poll");
         let interaction = self
             .client
             .create_and_poll(&request, self.poll_interval)

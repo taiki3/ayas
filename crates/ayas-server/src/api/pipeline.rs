@@ -9,6 +9,7 @@ use axum::response::Sse;
 use axum::{Json, Router, routing::post};
 use futures::Stream;
 use tokio::sync::mpsc;
+use tracing::{info, warn};
 
 use ayas_core::config::RunnableConfig;
 use ayas_core::message::{ContentPart, Message};
@@ -20,7 +21,7 @@ use ayas_llm::gemini::GeminiChatModel;
 
 use crate::error::AppError;
 use crate::extractors::ApiKeys;
-use crate::sse::{sse_done, sse_event};
+use crate::sse::{sse_done, sse_event, sse_response};
 
 // Embed demo files at compile time
 const NEEDS_MD: &str = include_str!("../../../../demo/needs.md");
@@ -35,8 +36,22 @@ pub fn routes() -> Router {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct PipelineRequest {
+    #[serde(default = "default_mode")]
+    pub mode: String, // "llm" | "manual"
     #[serde(default = "default_hypothesis_count")]
     pub hypothesis_count: u32,
+    pub needs: Option<String>,
+    pub seeds: Option<String>,
+    pub hypotheses: Option<Vec<ManualHypothesis>>, // Manual mode
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ManualHypothesis {
+    pub title: String,
+}
+
+fn default_mode() -> String {
+    "llm".to_string()
 }
 
 fn default_hypothesis_count() -> u32 {
@@ -58,6 +73,10 @@ enum PipelineSseEvent {
         index: u32,
         title: String,
         score: f64,
+        physical_contradiction: String,
+        cap_id_fingerprint: String,
+        verdict_tag: String,
+        verdict_reason: String,
     },
     Step3Start {
         index: u32,
@@ -90,13 +109,9 @@ struct HypothesesOutput {
 #[derive(Debug, serde::Deserialize, Clone)]
 struct HypothesisItem {
     title: String,
-    #[allow(dead_code)]
     physical_contradiction: String,
-    #[allow(dead_code)]
     cap_id_fingerprint: String,
-    #[allow(dead_code)]
     verdict_tag: String,
-    #[allow(dead_code)]
     verdict_reason: String,
     synthesis_score: f64,
 }
@@ -134,22 +149,32 @@ async fn pipeline_hypothesis(
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let api_key = api_keys.get_key_for(&ayas_llm::provider::Provider::Gemini)?;
     let hypothesis_count = req.hypothesis_count;
+    let mode = req.mode.clone();
+    let needs_text = req.needs.unwrap_or_else(|| NEEDS_MD.to_string());
+    let seeds_text = req.seeds.unwrap_or_else(|| SEEDS_MD.to_string());
+    let manual_hypotheses = req.hypotheses;
 
     let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
 
     tokio::spawn(async move {
-        run_pipeline(tx, api_key, hypothesis_count).await;
+        run_pipeline(tx, api_key, hypothesis_count, mode, needs_text, seeds_text, manual_hypotheses).await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    Ok(Sse::new(stream))
+    Ok(sse_response(stream))
 }
 
 async fn run_pipeline(
     tx: mpsc::Sender<Result<Event, std::convert::Infallible>>,
     api_key: String,
     hypothesis_count: u32,
+    mode: String,
+    needs_text: String,
+    seeds_text: String,
+    manual_hypotheses: Option<Vec<ManualHypothesis>>,
 ) {
+    info!(mode = %mode, hypothesis_count, "Pipeline started");
+
     let send = |event: &PipelineSseEvent| {
         let tx = tx.clone();
         let e = sse_event(event);
@@ -158,6 +183,141 @@ async fn run_pipeline(
         }
     };
 
+    let research_client = Arc::new(GeminiInteractionsClient::new(&api_key));
+
+    if mode == "manual" {
+        // === Manual mode: skip STEP 1 & 2, go straight to STEP 3 ===
+        let titles: Vec<String> = manual_hypotheses
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| h.title)
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+
+        if titles.is_empty() {
+            send(&PipelineSseEvent::Error {
+                message: "Manual mode requires at least one hypothesis title".into(),
+            })
+            .await;
+            let _ = tx.send(sse_done()).await;
+            return;
+        }
+
+        // Emit hypotheses with score=0.0
+        for (i, title) in titles.iter().enumerate() {
+            send(&PipelineSseEvent::Hypothesis {
+                index: i as u32,
+                title: title.clone(),
+                score: 0.0,
+                physical_contradiction: String::new(),
+                cap_id_fingerprint: String::new(),
+                verdict_tag: String::new(),
+                verdict_reason: String::new(),
+            })
+            .await;
+        }
+
+        // === STEP 3 ===
+        send(&PipelineSseEvent::StepStart {
+            step: 3,
+            description: format!(
+                "Deep Research x{}: 各仮説の深掘りレポートを並列実行中...",
+                titles.len()
+            ),
+        })
+        .await;
+
+        let (step3_tx, mut step3_rx) = mpsc::channel::<(u32, String, Result<String, String>)>(16);
+
+        for (i, title) in titles.iter().enumerate() {
+            let tx_inner = tx.clone();
+            let step3_tx = step3_tx.clone();
+            let title = title.clone();
+            let idx = i as u32;
+            let prompt3 = STEP3_PROMPT.replace("{HYPOTHESIS_TITLE}", &title);
+            let input3 = DeepResearchInput::new(&prompt3).with_attachments(vec![
+                ContentPart::Text {
+                    text: format!("=== technical_assets.json ===\n{}", seeds_text),
+                },
+                ContentPart::Text {
+                    text: format!("=== target_specification.txt ===\n{}", needs_text),
+                },
+            ]);
+            let research = DeepResearchRunnable::new(research_client.clone());
+            let config = RunnableConfig::default();
+
+            let _ = tx_inner
+                .send(sse_event(&PipelineSseEvent::Step3Start {
+                    index: idx,
+                    title: title.clone(),
+                }))
+                .await;
+
+            tokio::spawn(async move {
+                info!(idx, title = %title, "STEP 3 Deep Research invoke start");
+                let result = match research.invoke(input3, &config).await {
+                    Ok(output) => {
+                        info!(idx, "STEP 3 Deep Research invoke OK ({} chars)", output.text.len());
+                        Ok(output.text)
+                    }
+                    Err(e) => {
+                        warn!(idx, error = %e, "STEP 3 Deep Research invoke failed");
+                        Err(e.to_string())
+                    }
+                };
+                let _ = step3_tx.send((idx, title, result)).await;
+            });
+        }
+        drop(step3_tx);
+
+        let total = titles.len();
+        let mut completed = 0u32;
+        while let Some((idx, title, result)) = step3_rx.recv().await {
+            completed += 1;
+            info!(idx, completed, total, "STEP 3 result received");
+            match result {
+                Ok(text) => {
+                    send(&PipelineSseEvent::Step3Complete {
+                        index: idx,
+                        title,
+                        text,
+                    })
+                    .await;
+                }
+                Err(message) => {
+                    send(&PipelineSseEvent::Step3Error {
+                        index: idx,
+                        title,
+                        message,
+                    })
+                    .await;
+                }
+            }
+            if completed as usize == total {
+                break;
+            }
+        }
+
+        info!(completed, "Manual mode pipeline complete");
+
+        send(&PipelineSseEvent::StepComplete {
+            step: 3,
+            summary: format!("{}件の深掘りレポート完了", completed),
+        })
+        .await;
+
+        send(&PipelineSseEvent::Complete {
+            step1_text: String::new(),
+            hypotheses: serde_json::Value::Null,
+        })
+        .await;
+
+        let _ = tx.send(sse_done()).await;
+        return;
+    }
+
+    // === LLM mode (default): STEP 1 → 2 → 3 ===
+
     // === STEP 1: Deep Research ===
     send(&PipelineSseEvent::StepStart {
         step: 1,
@@ -165,17 +325,16 @@ async fn run_pipeline(
     })
     .await;
 
-    let research_client = Arc::new(GeminiInteractionsClient::new(&api_key));
     let research = DeepResearchRunnable::new(research_client.clone());
     let config = RunnableConfig::default();
 
     let prompt1 = STEP1_PROMPT.replace("{HYPOTHESIS_COUNT}", &hypothesis_count.to_string());
     let input1 = DeepResearchInput::new(&prompt1).with_attachments(vec![
         ContentPart::Text {
-            text: format!("=== target_specification.txt ===\n{}", NEEDS_MD),
+            text: format!("=== target_specification.txt ===\n{}", needs_text),
         },
         ContentPart::Text {
-            text: format!("=== technical_assets.json ===\n{}", SEEDS_MD),
+            text: format!("=== technical_assets.json ===\n{}", seeds_text),
         },
     ]);
 
@@ -258,6 +417,10 @@ async fn run_pipeline(
             index: i as u32,
             title: h.title.clone(),
             score: h.synthesis_score,
+            physical_contradiction: h.physical_contradiction.clone(),
+            cap_id_fingerprint: h.cap_id_fingerprint.clone(),
+            verdict_tag: h.verdict_tag.clone(),
+            verdict_reason: h.verdict_reason.clone(),
         })
         .await;
     }
@@ -272,7 +435,6 @@ async fn run_pipeline(
     })
     .await;
 
-    // Spawn each hypothesis as an independent task, report via SSE as each completes
     let (step3_tx, mut step3_rx) = mpsc::channel::<(u32, String, Result<String, String>)>(16);
 
     for (i, h) in hypotheses.hypotheses.iter().enumerate() {
@@ -286,16 +448,15 @@ async fn run_pipeline(
                 text: format!("=== hypothesis_context ===\n{}", output1.text),
             },
             ContentPart::Text {
-                text: format!("=== technical_assets.json ===\n{}", SEEDS_MD),
+                text: format!("=== technical_assets.json ===\n{}", seeds_text),
             },
             ContentPart::Text {
-                text: format!("=== target_specification.txt ===\n{}", NEEDS_MD),
+                text: format!("=== target_specification.txt ===\n{}", needs_text),
             },
         ]);
         let research = DeepResearchRunnable::new(research_client.clone());
         let config = RunnableConfig::default();
 
-        // Send start event
         let _ = tx_inner
             .send(sse_event(&PipelineSseEvent::Step3Start {
                 index: idx,
@@ -303,7 +464,6 @@ async fn run_pipeline(
             }))
             .await;
 
-        // Spawn independent task
         tokio::spawn(async move {
             let result = match research.invoke(input3, &config).await {
                 Ok(output) => Ok(output.text),
@@ -312,7 +472,7 @@ async fn run_pipeline(
             let _ = step3_tx.send((idx, title, result)).await;
         });
     }
-    drop(step3_tx); // close sender so rx ends when all tasks complete
+    drop(step3_tx);
 
     let total = hypotheses.hypotheses.len();
     let mut completed = 0u32;

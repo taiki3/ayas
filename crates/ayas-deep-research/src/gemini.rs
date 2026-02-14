@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::Stream;
 use reqwest::StatusCode;
+use tracing::{info, warn};
 
 use ayas_core::error::{AyasError, ModelError, Result};
 
@@ -65,20 +66,26 @@ impl GeminiInteractionsClient {
 #[async_trait]
 impl InteractionsClient for GeminiInteractionsClient {
     async fn create(&self, request: &CreateInteractionRequest) -> Result<Interaction> {
+        info!(agent = %request.agent, background = request.background, "Sending create interaction POST");
         let response = self
             .client
             .post(self.interactions_url())
             .json(request)
             .send()
             .await
-            .map_err(|e| AyasError::Model(ModelError::ApiRequest(e.to_string())))?;
+            .map_err(|e| {
+                warn!(error = %e, "Create interaction POST failed");
+                AyasError::Model(ModelError::ApiRequest(e.to_string()))
+            })?;
 
         let status = response.status();
+        info!(%status, "Create interaction response received");
         if !status.is_success() {
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "failed to read response body".into());
+            warn!(%status, body = %body, "Create interaction API error");
             return Err(Self::map_status_error(status, body));
         }
 

@@ -162,25 +162,35 @@ export async function streamSSE<T>(
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const data = trimmed.slice(5).trim();
-      if (data === '[DONE]') return;
-      try {
-        onEvent(JSON.parse(data) as T);
-      } catch {
-        // skip unparseable events
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') return;
+        try {
+          onEvent(JSON.parse(data) as T);
+        } catch {
+          // skip unparseable events (including keepalive comments)
+        }
       }
     }
+  } catch (err) {
+    // Re-throw AbortError as-is; wrap network errors with more context
+    if (err instanceof DOMException && err.name === 'AbortError') throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `SSE connection lost: ${msg}. The server may still be processing. ` +
+      `If this persists, try running the pipeline again.`
+    );
   }
 }
 
@@ -406,10 +416,22 @@ export interface PipelineSseEvent {
   step1_text?: string;
   hypotheses?: unknown;
   message?: string;
+  physical_contradiction?: string;
+  cap_id_fingerprint?: string;
+  verdict_tag?: string;
+  verdict_reason?: string;
+}
+
+export interface PipelineInvokeParams {
+  mode: 'llm' | 'manual';
+  hypothesis_count: number;
+  needs?: string;
+  seeds?: string;
+  hypotheses?: { title: string }[];
 }
 
 export function pipelineInvokeStream(
-  hypothesisCount: number,
+  params: PipelineInvokeParams,
   onEvent: (event: PipelineSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -419,7 +441,7 @@ export function pipelineInvokeStream(
   }
   return streamSSE(
     '/api/pipeline/hypothesis',
-    { hypothesis_count: hypothesisCount },
+    params,
     {
       'Content-Type': 'application/json',
       'X-Gemini-Key': apiKey,

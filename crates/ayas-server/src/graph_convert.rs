@@ -248,7 +248,7 @@ async fn build_llm_node(
     let model_id = config
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or("gemini-2.0-flash")
+        .unwrap_or("gemini-2.5-flash")
         .to_string();
 
     let api_key = ctx.api_keys.get_key_for(&provider).map_err(|e| {
@@ -461,7 +461,7 @@ mod tests {
         n.config = Some(serde_json::json!({
             "prompt": "Hello",
             "provider": "gemini",
-            "model": "gemini-2.0-flash"
+            "model": "gemini-2.5-flash"
         }));
         let nodes = vec![n];
         let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
@@ -603,7 +603,7 @@ mod tests {
         n.config = Some(json!({
             "prompt": "You are a helpful assistant",
             "provider": "gemini",
-            "model": "gemini-2.0-flash"
+            "model": "gemini-2.5-flash"
         }));
         let nodes = vec![n];
         let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
@@ -661,7 +661,7 @@ mod tests {
         n.config = Some(json!({
             "prompt": "Summarize",
             "provider": "gemini",
-            "model": "gemini-2.0-flash",
+            "model": "gemini-2.5-flash",
             "input_channel": "input_text",
             "output_channel": "result"
         }));

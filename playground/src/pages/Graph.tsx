@@ -116,9 +116,30 @@ const INITIAL_EDGES: Edge[] = [];
 
 type ChannelEntry = { key: string; type: string; default?: string };
 
+const MODEL_OPTIONS: Record<string, { id: string; label: string }[]> = {
+  gemini: [
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { id: 'gemini-3.0-flash', label: 'Gemini 3.0 Flash' },
+    { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (Preview)' },
+    { id: 'gemini-3-pro-preview', label: 'Gemini 3 Pro (Preview)' },
+  ],
+  claude: [
+    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+    { id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
+    { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
+    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+  ],
+  openai: [
+    { id: 'gpt-5.3', label: 'GPT-5.3' },
+    { id: 'gpt-5.2', label: 'GPT-5.2' },
+    { id: 'gpt-5.2-pro', label: 'GPT-5.2 Pro' },
+  ],
+};
+
 const DEFAULT_LLM_CONFIG: NodeConfig = {
   provider: 'gemini',
-  model: 'gemini-2.0-flash',
+  model: 'gemini-2.5-flash',
   prompt: '',
   temperature: 0.7,
   input_channel: 'value',
@@ -298,7 +319,12 @@ export default function Graph() {
             <label className="block text-xs text-muted-foreground mb-0.5">Provider</label>
             <select
               value={(config.provider as string) || 'gemini'}
-              onChange={(e) => updateNodeConfig(id, 'provider', e.target.value)}
+              onChange={(e) => {
+                const newProvider = e.target.value;
+                updateNodeConfig(id, 'provider', newProvider);
+                const models = MODEL_OPTIONS[newProvider];
+                if (models?.[0]) updateNodeConfig(id, 'model', models[0].id);
+              }}
               className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
             >
               <option value="gemini">Gemini</option>
@@ -308,13 +334,15 @@ export default function Graph() {
           </div>
           <div>
             <label className="block text-xs text-muted-foreground mb-0.5">Model</label>
-            <input
-              type="text"
+            <select
               value={(config.model as string) || ''}
               onChange={(e) => updateNodeConfig(id, 'model', e.target.value)}
-              placeholder="gemini-2.0-flash"
-              className="w-full px-2 py-1.5 border border-border rounded text-xs"
-            />
+              className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+            >
+              {(MODEL_OPTIONS[(config.provider as string) || 'gemini'] || []).map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-muted-foreground mb-0.5">System Prompt</label>

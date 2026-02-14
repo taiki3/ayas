@@ -14,24 +14,22 @@ impl Provider {
     pub fn default_models(&self) -> &[&str] {
         match self {
             Provider::Gemini => &[
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
                 "gemini-3.0-flash",
                 "gemini-3-flash-preview",
                 "gemini-3-pro-preview",
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
             ],
             Provider::Claude => &[
                 "claude-opus-4-6",
-                "claude-sonnet-4-5-20250929",
-                "claude-haiku-4-5-20251001",
+                "claude-opus-4-5",
+                "claude-sonnet-4-5",
+                "claude-haiku-4-5",
             ],
             Provider::OpenAI => &[
                 "gpt-5.3",
                 "gpt-5.2",
-                "gpt-4.1",
-                "gpt-4.1-mini",
-                "o4-mini",
-                "o3-mini",
+                "gpt-5.2-pro",
             ],
         }
     }

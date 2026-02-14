@@ -25,14 +25,14 @@ The graph has these components:
   {
     "prompt": "System prompt for the LLM",
     "provider": "gemini" | "claude" | "openai",
-    "model": "gemini-2.0-flash",
+    "model": "gemini-2.5-flash",
     "temperature": 0.7,
     "input_channel": "value",
     "output_channel": "value"
   }
   - "prompt" (required): The system instruction for the LLM.
   - "provider" (default: "gemini"): Which LLM provider to use.
-  - "model" (default: "gemini-2.0-flash"): Model identifier.
+  - "model" (default: "gemini-2.5-flash"): Model identifier.
   - "temperature" (default: 0.7): Sampling temperature (0-2).
   - "input_channel" (default: "value"): State key to read user input from.
   - "output_channel" (default: "value"): State key to write LLM response to.

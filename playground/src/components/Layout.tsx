@@ -1,6 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import ApiKeysModal from './ApiKeysModal';
+import { fetchEnvKeys, type EnvKeys } from '../lib/api';
+
+const API_URL = import.meta.env.VITE_API_URL || '';
 
 const TABS = [
   { to: '/', label: 'Chat' },
@@ -14,25 +17,72 @@ const TABS = [
   { to: '/dashboard', label: 'Dashboard' },
 ];
 
+type BackendStatus = 'checking' | 'connected' | 'disconnected';
+
 export default function Layout() {
   const [keysOpen, setKeysOpen] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
+  const [envKeys, setEnvKeys] = useState<EnvKeys | null>(null);
+
+  const allEnvKeys = envKeys != null && envKeys.gemini && envKeys.claude && envKeys.openai;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkHealth() {
+      setBackendStatus('checking');
+      try {
+        const resp = await fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(3000) });
+        if (!cancelled) setBackendStatus(resp.ok ? 'connected' : 'disconnected');
+      } catch {
+        if (!cancelled) setBackendStatus('disconnected');
+      }
+    }
+    checkHealth();
+    const interval = setInterval(checkHealth, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  useEffect(() => {
+    fetchEnvKeys().then(setEnvKeys);
+  }, []);
 
   return (
-    <div className="flex flex-col h-screen min-w-[1024px] bg-gray-50">
-      <header className="flex items-center justify-between px-6 h-14 border-b border-gray-200 bg-white shrink-0">
-        <div className="flex items-center gap-8">
-          <h1 className="text-base font-semibold text-gray-900 tracking-tight">Ayas Playground</h1>
-          <nav className="flex gap-1">
+    <div className="flex flex-col h-screen min-w-[1024px] bg-surface">
+      <header className="flex items-center justify-between px-6 h-16 border-b border-border bg-card shrink-0">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2.5">
+            <span
+              className="font-serif text-3xl font-bold tracking-tight leading-tight"
+              style={{
+                backgroundImage: 'linear-gradient(135deg, #BBBF45 0%, #BFA454 60%, #D93240 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                backgroundClip: 'text',
+              }}
+            >
+              Ayas Playground
+            </span>
+            <span
+              className={`h-2 w-2 rounded-full shrink-0 ${
+                backendStatus === 'connected' ? 'bg-success' :
+                backendStatus === 'disconnected' ? 'bg-destructive' :
+                'bg-warning animate-pulse'
+              }`}
+              title={`Backend: ${backendStatus}`}
+            />
+          </div>
+
+          <nav className="flex items-center gap-1">
             {TABS.map(({ to, label }) => (
               <NavLink
                 key={to}
                 to={to}
                 end={to === '/'}
                 className={({ isActive }) =>
-                  `px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  `px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                     isActive
-                      ? 'bg-gray-900 text-white'
-                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                   }`
                 }
               >
@@ -42,10 +92,16 @@ export default function Layout() {
           </nav>
         </div>
         <button
-          onClick={() => setKeysOpen(true)}
-          className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 border border-gray-200 rounded-md hover:bg-gray-50"
+          onClick={() => !allEnvKeys && setKeysOpen(true)}
+          disabled={!!allEnvKeys}
+          className={`px-3 py-1.5 text-sm border rounded-md transition-colors ${
+            allEnvKeys
+              ? 'text-muted-foreground/50 border-border/50 cursor-not-allowed'
+              : 'text-muted-foreground hover:text-foreground border-border hover:bg-muted'
+          }`}
+          title={allEnvKeys ? 'API keys are configured via environment variables' : 'Configure API keys'}
         >
-          API Keys
+          API Keys{allEnvKeys ? ' (env)' : ''}
         </button>
       </header>
 

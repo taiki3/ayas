@@ -182,10 +182,10 @@ export default function Agent() {
   return (
     <div className="flex h-full">
       {/* Tool Settings Panel */}
-      <aside className="w-[260px] border-r border-gray-200 bg-white p-4 overflow-y-auto shrink-0">
+      <aside className="w-[260px] border-r border-border bg-card p-4 overflow-y-auto shrink-0">
         <div className="space-y-5">
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Tools</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Tools</label>
             <div className="space-y-2">
               {BUILTIN_TOOLS.map((tool) => (
                 <label key={tool.id} className="flex items-center gap-2 cursor-pointer">
@@ -193,23 +193,23 @@ export default function Agent() {
                     type="checkbox"
                     checked={enabledTools.has(tool.id)}
                     onChange={() => toggleTool(tool.id)}
-                    className="rounded border-gray-300 accent-gray-900"
+                    className="rounded border-border accent-primary"
                   />
-                  <span className="text-sm text-gray-800">{tool.label}</span>
-                  <span className="text-xs text-gray-400">— {tool.desc}</span>
+                  <span className="text-sm text-foreground">{tool.label}</span>
+                  <span className="text-xs text-muted-foreground">— {tool.desc}</span>
                 </label>
               ))}
             </div>
           </div>
 
-          <hr className="border-gray-200" />
+          <hr className="border-border" />
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Provider</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Provider</label>
             <select
               value={provider}
               onChange={(e) => setProvider(e.target.value as Provider)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm bg-card focus:outline-none focus:ring-2 focus:ring-ring"
             >
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
@@ -218,11 +218,11 @@ export default function Agent() {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Model</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Model</label>
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm bg-card focus:outline-none focus:ring-2 focus:ring-ring"
             >
               {PROVIDER_MODELS[provider].map((m) => (
                 <option key={m} value={m}>{m}</option>
@@ -231,7 +231,7 @@ export default function Agent() {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">
               Recursion Limit: {recursionLimit}
             </label>
             <input
@@ -240,9 +240,9 @@ export default function Agent() {
               max="100"
               value={recursionLimit}
               onChange={(e) => setRecursionLimit(parseInt(e.target.value))}
-              className="w-full accent-gray-900"
+              className="w-full accent-primary"
             />
-            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+            <div className="flex justify-between text-xs text-muted-foreground mt-0.5">
               <span>1</span>
               <span>100</span>
             </div>
@@ -253,14 +253,14 @@ export default function Agent() {
       {/* Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {error && (
-          <div className="px-6 py-3 bg-red-50 border-b border-red-200">
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="px-6 py-3 bg-destructive/10 border-b border-destructive/30">
+            <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {messages.length === 0 && !loading && (
-            <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
               Send a message to start an agent conversation
             </div>
           )}
@@ -269,7 +269,7 @@ export default function Agent() {
               if (msg.kind === 'user') {
                 return (
                   <div key={i} className="flex justify-end">
-                    <div className="max-w-[80%] bg-gray-900 text-white rounded-lg px-4 py-2.5">
+                    <div className="max-w-[80%] bg-primary text-primary-foreground rounded-lg px-4 py-2.5">
                       <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
                     </div>
                   </div>
@@ -278,8 +278,8 @@ export default function Agent() {
               if (msg.kind === 'ai') {
                 return (
                   <div key={i} className="flex justify-start">
-                    <div className="max-w-[80%] bg-white border border-gray-200 rounded-lg px-4 py-2.5">
-                      <p className="text-sm whitespace-pre-wrap break-words text-gray-800">{msg.content}</p>
+                    <div className="max-w-[80%] bg-muted rounded-lg px-4 py-2.5">
+                      <p className="text-sm whitespace-pre-wrap break-words text-foreground">{msg.content}</p>
                     </div>
                   </div>
                 );
@@ -297,7 +297,7 @@ export default function Agent() {
               // tool_result
               return (
                 <div key={i} className="flex justify-start pl-4">
-                  <div className="bg-gray-50 border border-gray-200 rounded px-3 py-1.5 text-xs font-mono text-gray-600">
+                  <div className="bg-muted rounded px-3 py-1.5 text-xs font-mono text-card-foreground">
                     → {msg.content}
                   </div>
                 </div>
@@ -305,11 +305,11 @@ export default function Agent() {
             })}
             {loading && (
               <div className="flex justify-start">
-                <div className="bg-white border border-gray-200 rounded-lg px-4 py-2.5">
+                <div className="bg-muted rounded-lg px-4 py-2.5">
                   <div className="flex gap-1">
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                    <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce [animation-delay:0ms]" />
+                    <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce [animation-delay:150ms]" />
+                    <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce [animation-delay:300ms]" />
                   </div>
                 </div>
               </div>
@@ -318,7 +318,7 @@ export default function Agent() {
           </div>
         </div>
 
-        <div className="border-t border-gray-200 bg-white px-6 py-4 shrink-0">
+        <div className="border-t border-border bg-card px-6 py-4 shrink-0">
           <div className="max-w-2xl mx-auto flex gap-3">
             <textarea
               ref={inputRef}
@@ -327,12 +327,12 @@ export default function Agent() {
               onKeyDown={handleKeyDown}
               placeholder="Send a message..."
               rows={1}
-              className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex-1 px-4 py-2.5 border border-border rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
             />
             <button
               onClick={handleSend}
               disabled={loading || !input.trim()}
-              className="px-5 py-2.5 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+              className="px-5 py-2.5 bg-primary text-primary-foreground text-sm rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
             >
               {loading ? (
                 <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
@@ -346,10 +346,10 @@ export default function Agent() {
       </div>
 
       {/* Trace Panel */}
-      <aside className="w-[340px] border-l border-gray-200 bg-white p-4 overflow-y-auto shrink-0">
-        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Execution Trace</h3>
+      <aside className="w-[340px] border-l border-border bg-card p-4 overflow-y-auto shrink-0">
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Execution Trace</h3>
         {traceSteps.length === 0 && !loading && (
-          <p className="text-sm text-gray-400">No trace yet</p>
+          <p className="text-sm text-muted-foreground">No trace yet</p>
         )}
         <div className="space-y-3">
           {traceSteps.map((step, i) => (
@@ -357,7 +357,7 @@ export default function Agent() {
           ))}
         </div>
         {totalSteps !== null && (
-          <div className="mt-4 px-3 py-2 bg-green-50 border border-green-200 rounded-md text-sm text-green-700">
+          <div className="mt-4 px-3 py-2 bg-success/10 border border-success/30 rounded-md text-sm text-success">
             ✅ {totalSteps} step{totalSteps !== 1 ? 's' : ''} completed
           </div>
         )}
@@ -372,7 +372,7 @@ function TraceCard({ step }: { step: TraceStep }) {
   return (
     <div
       className={`border rounded-lg p-3 cursor-pointer transition-colors ${
-        step.status === 'active' ? 'border-blue-300 bg-blue-50' : 'border-gray-200'
+        step.status === 'active' ? 'border-blue-300 bg-blue-50' : 'border-border'
       }`}
       onClick={() => setExpanded(!expanded)}
     >
@@ -383,17 +383,17 @@ function TraceCard({ step }: { step: TraceStep }) {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
         ) : (
-          <span className="text-xs text-gray-400">Step {step.stepNumber}</span>
+          <span className="text-xs text-muted-foreground">Step {step.stepNumber}</span>
         )}
         <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
           step.nodeName === 'agent' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'
         }`}>
           {step.nodeName}
         </span>
-        <span className="text-xs text-gray-600 truncate flex-1">{step.summary}</span>
+        <span className="text-xs text-card-foreground truncate flex-1">{step.summary}</span>
       </div>
       {expanded && step.details.length > 0 && (
-        <pre className="mt-2 text-xs bg-gray-50 rounded p-2 overflow-x-auto text-gray-600 max-h-48 overflow-y-auto">
+        <pre className="mt-2 text-xs bg-surface rounded p-2 overflow-x-auto text-card-foreground max-h-48 overflow-y-auto">
           {JSON.stringify(step.details, null, 2)}
         </pre>
       )}

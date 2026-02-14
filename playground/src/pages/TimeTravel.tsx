@@ -69,32 +69,32 @@ export default function TimeTravel() {
   return (
     <div className="flex h-full">
       {/* Left: Steps Timeline */}
-      <div className="w-[360px] border-r border-gray-200 bg-white flex flex-col shrink-0">
-        <div className="p-4 border-b border-gray-200 space-y-3">
+      <div className="w-[360px] border-r border-border bg-card flex flex-col shrink-0">
+        <div className="p-4 border-b border-border space-y-3">
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Trace ID</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase mb-1">Trace ID</label>
             <input
               type="text"
               value={traceId}
               onChange={(e) => setTraceId(e.target.value)}
               placeholder="Enter trace UUID..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
           <div className="flex gap-2">
             <div className="flex-1">
-              <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Project</label>
+              <label className="block text-xs font-medium text-muted-foreground uppercase mb-1">Project</label>
               <input
                 type="text"
                 value={project}
                 onChange={(e) => setProject(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="w-full px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
             <button
               onClick={fetchTrace}
               disabled={loading || !traceId.trim()}
-              className="self-end px-4 py-2 bg-gray-900 text-white text-sm rounded-md hover:bg-gray-800 disabled:opacity-50"
+              className="self-end px-4 py-2 bg-primary text-primary-foreground text-sm rounded-md hover:opacity-90 disabled:opacity-50"
             >
               {loading ? 'Loading...' : 'Load'}
             </button>
@@ -102,15 +102,15 @@ export default function TimeTravel() {
         </div>
 
         {error && (
-          <div className="px-4 py-3 bg-red-50 border-b border-red-200">
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="px-4 py-3 bg-destructive/10 border-b border-destructive/30">
+            <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
 
         {/* Steps list */}
         <div className="flex-1 overflow-y-auto p-3">
           {steps.length === 0 && !loading && (
-            <p className="text-sm text-gray-400 text-center mt-8">
+            <p className="text-sm text-muted-foreground text-center mt-8">
               Enter a Trace ID to load execution steps.
             </p>
           )}
@@ -122,7 +122,7 @@ export default function TimeTravel() {
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors ${
                   selectedStep === i
                     ? 'bg-blue-50 border border-blue-200'
-                    : 'hover:bg-gray-50 border border-transparent'
+                    : 'hover:bg-surface border border-transparent'
                 }`}
               >
                 {/* Step number */}
@@ -137,16 +137,16 @@ export default function TimeTravel() {
                     {step.stepNumber}
                   </span>
                   {i < steps.length - 1 && (
-                    <div className="w-px h-4 bg-gray-200 mt-1" />
+                    <div className="w-px h-4 bg-border mt-1" />
                   )}
                 </div>
                 {/* Info */}
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-gray-900 truncate">{step.run.name}</div>
+                  <div className="text-sm font-medium text-foreground truncate">{step.run.name}</div>
                   <div className="flex gap-2 mt-0.5">
-                    <span className="text-xs text-gray-500">{step.run.run_type}</span>
+                    <span className="text-xs text-muted-foreground">{step.run.run_type}</span>
                     {step.run.latency_ms !== null && (
-                      <span className="text-xs text-gray-400">{step.run.latency_ms}ms</span>
+                      <span className="text-xs text-muted-foreground">{step.run.latency_ms}ms</span>
                     )}
                   </div>
                 </div>
@@ -157,30 +157,30 @@ export default function TimeTravel() {
       </div>
 
       {/* Right: Step Detail */}
-      <div className="flex-1 overflow-y-auto bg-gray-50 p-6">
+      <div className="flex-1 overflow-y-auto bg-surface p-6">
         {!currentStep && (
-          <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Select a step to view its state snapshot
           </div>
         )}
         {currentStep && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">
+              <h2 className="text-lg font-semibold text-foreground">
                 Step {currentStep.stepNumber}: {currentStep.run.name}
               </h2>
               <div className="flex gap-2">
                 <button
                   onClick={() => setSelectedStep(Math.max(0, (selectedStep ?? 0) - 1))}
                   disabled={selectedStep === 0}
-                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-40"
+                  className="px-3 py-1.5 text-sm border border-border rounded-md hover:bg-surface disabled:opacity-40"
                 >
                   Prev
                 </button>
                 <button
                   onClick={() => setSelectedStep(Math.min(steps.length - 1, (selectedStep ?? 0) + 1))}
                   disabled={selectedStep === steps.length - 1}
-                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-40"
+                  className="px-3 py-1.5 text-sm border border-border rounded-md hover:bg-surface disabled:opacity-40"
                 >
                   Next
                 </button>
@@ -188,18 +188,18 @@ export default function TimeTravel() {
             </div>
 
             {/* Metadata */}
-            <div className="bg-white border border-gray-200 rounded-lg p-4">
+            <div className="bg-card border border-border rounded-lg p-4">
               <div className="grid grid-cols-3 gap-4 text-xs">
                 <div>
-                  <span className="text-gray-500 block">Run ID</span>
-                  <span className="text-gray-800 font-mono truncate block">{currentStep.run.run_id}</span>
+                  <span className="text-muted-foreground block">Run ID</span>
+                  <span className="text-foreground font-mono truncate block">{currentStep.run.run_id}</span>
                 </div>
                 <div>
-                  <span className="text-gray-500 block">Type</span>
-                  <span className="text-gray-800 capitalize">{currentStep.run.run_type}</span>
+                  <span className="text-muted-foreground block">Type</span>
+                  <span className="text-foreground capitalize">{currentStep.run.run_type}</span>
                 </div>
                 <div>
-                  <span className="text-gray-500 block">Status</span>
+                  <span className="text-muted-foreground block">Status</span>
                   <span className={`px-2 py-0.5 rounded font-medium ${
                     currentStep.run.status === 'success' ? 'bg-green-100 text-green-700' :
                     currentStep.run.status === 'error' ? 'bg-red-100 text-red-700' :
@@ -207,18 +207,18 @@ export default function TimeTravel() {
                   }`}>{currentStep.run.status}</span>
                 </div>
                 <div>
-                  <span className="text-gray-500 block">Start</span>
-                  <span className="text-gray-800">{formatTime(currentStep.run.start_time)}</span>
+                  <span className="text-muted-foreground block">Start</span>
+                  <span className="text-foreground">{formatTime(currentStep.run.start_time)}</span>
                 </div>
                 <div>
-                  <span className="text-gray-500 block">End</span>
-                  <span className="text-gray-800">
+                  <span className="text-muted-foreground block">End</span>
+                  <span className="text-foreground">
                     {currentStep.run.end_time ? formatTime(currentStep.run.end_time) : '-'}
                   </span>
                 </div>
                 <div>
-                  <span className="text-gray-500 block">Latency</span>
-                  <span className="text-gray-800">
+                  <span className="text-muted-foreground block">Latency</span>
+                  <span className="text-foreground">
                     {currentStep.run.latency_ms !== null ? `${currentStep.run.latency_ms}ms` : '-'}
                   </span>
                 </div>
@@ -226,18 +226,18 @@ export default function TimeTravel() {
             </div>
 
             {/* Input Snapshot */}
-            <div className="bg-white border border-gray-200 rounded-lg p-4">
-              <h3 className="text-xs font-medium text-gray-500 uppercase mb-2">Input</h3>
-              <pre className="text-xs bg-gray-50 rounded p-3 overflow-x-auto text-gray-700 max-h-60 overflow-y-auto font-mono">
+            <div className="bg-card border border-border rounded-lg p-4">
+              <h3 className="text-xs font-medium text-muted-foreground uppercase mb-2">Input</h3>
+              <pre className="text-xs bg-surface rounded p-3 overflow-x-auto text-card-foreground max-h-60 overflow-y-auto font-mono">
                 {tryFormatJson(currentStep.run.input)}
               </pre>
             </div>
 
             {/* Output Snapshot */}
             {currentStep.run.output && (
-              <div className="bg-white border border-gray-200 rounded-lg p-4">
-                <h3 className="text-xs font-medium text-gray-500 uppercase mb-2">Output</h3>
-                <pre className="text-xs bg-gray-50 rounded p-3 overflow-x-auto text-gray-700 max-h-60 overflow-y-auto font-mono">
+              <div className="bg-card border border-border rounded-lg p-4">
+                <h3 className="text-xs font-medium text-muted-foreground uppercase mb-2">Output</h3>
+                <pre className="text-xs bg-surface rounded p-3 overflow-x-auto text-card-foreground max-h-60 overflow-y-auto font-mono">
                   {tryFormatJson(currentStep.run.output)}
                 </pre>
               </div>
@@ -245,9 +245,9 @@ export default function TimeTravel() {
 
             {/* Error */}
             {currentStep.run.error && (
-              <div className="bg-white border border-red-200 rounded-lg p-4">
-                <h3 className="text-xs font-medium text-red-500 uppercase mb-2">Error</h3>
-                <pre className="text-xs bg-red-50 rounded p-3 overflow-x-auto text-red-700 max-h-60 overflow-y-auto font-mono">
+              <div className="bg-card border border-destructive/30 rounded-lg p-4">
+                <h3 className="text-xs font-medium text-destructive uppercase mb-2">Error</h3>
+                <pre className="text-xs bg-destructive/10 rounded p-3 overflow-x-auto text-destructive max-h-60 overflow-y-auto font-mono">
                   {currentStep.run.error}
                 </pre>
               </div>
@@ -255,8 +255,8 @@ export default function TimeTravel() {
 
             {/* Diff Highlight */}
             {prevStep && (
-              <div className="bg-white border border-gray-200 rounded-lg p-4">
-                <h3 className="text-xs font-medium text-gray-500 uppercase mb-2">
+              <div className="bg-card border border-border rounded-lg p-4">
+                <h3 className="text-xs font-medium text-muted-foreground uppercase mb-2">
                   Changes from Step {prevStep.stepNumber}
                 </h3>
                 <DiffView
@@ -277,7 +277,7 @@ function DiffView({ prevOutput, currentInput }: { prevOutput: string; currentInp
   const currentFormatted = tryFormatJson(currentInput);
 
   if (prevFormatted === currentFormatted) {
-    return <p className="text-xs text-gray-400">No changes detected</p>;
+    return <p className="text-xs text-muted-foreground">No changes detected</p>;
   }
 
   const prevLines = prevFormatted.split('\n');
@@ -287,8 +287,8 @@ function DiffView({ prevOutput, currentInput }: { prevOutput: string; currentInp
   return (
     <div className="grid grid-cols-2 gap-2">
       <div>
-        <span className="text-xs text-gray-400 block mb-1">Previous</span>
-        <pre className="text-xs bg-red-50 rounded p-2 overflow-x-auto text-gray-700 max-h-40 overflow-y-auto font-mono">
+        <span className="text-xs text-muted-foreground block mb-1">Previous</span>
+        <pre className="text-xs bg-red-50 rounded p-2 overflow-x-auto text-card-foreground max-h-40 overflow-y-auto font-mono">
           {prevLines.map((line, i) => (
             <div
               key={i}
@@ -300,8 +300,8 @@ function DiffView({ prevOutput, currentInput }: { prevOutput: string; currentInp
         </pre>
       </div>
       <div>
-        <span className="text-xs text-gray-400 block mb-1">Current</span>
-        <pre className="text-xs bg-green-50 rounded p-2 overflow-x-auto text-gray-700 max-h-40 overflow-y-auto font-mono">
+        <span className="text-xs text-muted-foreground block mb-1">Current</span>
+        <pre className="text-xs bg-green-50 rounded p-2 overflow-x-auto text-card-foreground max-h-40 overflow-y-auto font-mono">
           {currentLines.map((line, i) => (
             <div
               key={i}

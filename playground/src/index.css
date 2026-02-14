@@ -1,1 +1,36 @@
 @import "tailwindcss";
+
+@theme {
+  /* Ayas brand palette */
+  --color-primary: hsl(61 48% 51%);
+  --color-primary-foreground: hsl(241 7% 23%);
+  --color-accent: hsl(45 45% 54%);
+  --color-accent-foreground: hsl(241 7% 23%);
+  --color-destructive: hsl(354 68% 52%);
+  --color-destructive-foreground: hsl(0 0% 100%);
+  --color-muted: hsl(240 3% 90%);
+  --color-muted-foreground: hsl(240 4% 46%);
+  --color-card: hsl(0 0% 100%);
+  --color-card-foreground: hsl(241 7% 23%);
+  --color-surface: hsl(240 5% 96%);
+  --color-foreground: hsl(241 7% 23%);
+  --color-border: hsl(240 3% 82%);
+  --color-input: hsl(240 3% 82%);
+  --color-ring: hsl(61 48% 51%);
+  --color-success: hsl(142 71% 45%);
+  --color-success-foreground: hsl(0 0% 100%);
+  --color-warning: hsl(45 45% 54%);
+  --color-warning-foreground: hsl(0 0% 100%);
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-foreground);
+}
+
+/* Focus ring using brand color */
+:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}

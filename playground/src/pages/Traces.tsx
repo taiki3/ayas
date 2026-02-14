@@ -20,7 +20,7 @@ function statusBadge(status: string) {
     case 'running':
       return 'bg-blue-100 text-blue-700';
     default:
-      return 'bg-gray-100 text-gray-700';
+      return 'bg-muted text-card-foreground';
   }
 }
 
@@ -98,22 +98,22 @@ export default function Traces() {
       {/* Run List */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Filters */}
-        <div className="flex items-center gap-3 px-6 py-3 border-b border-gray-200 bg-white shrink-0">
+        <div className="flex items-center gap-3 px-6 py-3 border-b border-border bg-card shrink-0">
           <div className="flex items-center gap-1.5">
-            <label className="text-xs font-medium text-gray-500 uppercase">Project</label>
+            <label className="text-xs font-medium text-muted-foreground uppercase">Project</label>
             <input
               type="text"
               value={project}
               onChange={(e) => setProject(e.target.value)}
-              className="px-2 py-1.5 border border-gray-300 rounded-md text-sm w-32 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="px-2 py-1.5 border border-border rounded-md text-sm w-32 focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
           <div className="flex items-center gap-1.5">
-            <label className="text-xs font-medium text-gray-500 uppercase">Type</label>
+            <label className="text-xs font-medium text-muted-foreground uppercase">Type</label>
             <select
               value={runTypeFilter}
               onChange={(e) => setRunTypeFilter(e.target.value as RunType)}
-              className="px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white"
+              className="px-2 py-1.5 border border-border rounded-md text-sm bg-card"
             >
               <option value="">All</option>
               <option value="chain">Chain</option>
@@ -124,11 +124,11 @@ export default function Traces() {
             </select>
           </div>
           <div className="flex items-center gap-1.5">
-            <label className="text-xs font-medium text-gray-500 uppercase">Status</label>
+            <label className="text-xs font-medium text-muted-foreground uppercase">Status</label>
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as RunStatus)}
-              className="px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white"
+              className="px-2 py-1.5 border border-border rounded-md text-sm bg-card"
             >
               <option value="">All</option>
               <option value="success">Success</option>
@@ -139,23 +139,23 @@ export default function Traces() {
           <button
             onClick={fetchRuns}
             disabled={loading}
-            className="px-3 py-1.5 bg-gray-900 text-white text-sm rounded-md hover:bg-gray-800 disabled:opacity-50"
+            className="px-3 py-1.5 bg-primary text-primary-foreground text-sm rounded-md hover:opacity-90 disabled:opacity-50"
           >
             {loading ? 'Loading...' : 'Refresh'}
           </button>
         </div>
 
         {error && (
-          <div className="px-6 py-3 bg-red-50 border-b border-red-200">
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="px-6 py-3 bg-destructive/10 border-b border-destructive/30">
+            <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
 
         {/* Table */}
         <div className="flex-1 overflow-auto">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 sticky top-0">
-              <tr className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+            <thead className="bg-surface sticky top-0">
+              <tr className="text-left text-xs font-medium text-muted-foreground uppercase tracking-wide">
                 <th className="px-6 py-3">Name</th>
                 <th className="px-4 py-3">Type</th>
                 <th className="px-4 py-3">Status</th>
@@ -163,10 +163,10 @@ export default function Traces() {
                 <th className="px-4 py-3">Start Time</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-border">
               {runs.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={5} className="px-6 py-12 text-center text-gray-400">
+                  <td colSpan={5} className="px-6 py-12 text-center text-muted-foreground">
                     No runs found. Try adjusting the filters or ingesting trace data.
                   </td>
                 </tr>
@@ -175,21 +175,21 @@ export default function Traces() {
                 <tr
                   key={run.run_id}
                   onClick={() => handleSelectRun(run)}
-                  className={`cursor-pointer hover:bg-gray-50 transition-colors ${
+                  className={`cursor-pointer hover:bg-surface transition-colors ${
                     selectedRun?.run_id === run.run_id ? 'bg-blue-50' : ''
                   }`}
                 >
-                  <td className="px-6 py-3 font-medium text-gray-900 truncate max-w-[200px]">{run.name}</td>
+                  <td className="px-6 py-3 font-medium text-foreground truncate max-w-[200px]">{run.name}</td>
                   <td className="px-4 py-3">
-                    <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">{run.run_type}</span>
+                    <span className="px-2 py-0.5 bg-muted text-card-foreground rounded text-xs">{run.run_type}</span>
                   </td>
                   <td className="px-4 py-3">
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusBadge(run.status)}`}>
                       {run.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-600">{formatLatency(run.latency_ms)}</td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">{formatTime(run.start_time)}</td>
+                  <td className="px-4 py-3 text-card-foreground">{formatLatency(run.latency_ms)}</td>
+                  <td className="px-4 py-3 text-muted-foreground text-xs">{formatTime(run.start_time)}</td>
                 </tr>
               ))}
             </tbody>
@@ -198,60 +198,60 @@ export default function Traces() {
       </div>
 
       {/* Detail Panel */}
-      <aside className="w-[400px] border-l border-gray-200 bg-white overflow-y-auto shrink-0">
+      <aside className="w-[400px] border-l border-border bg-card overflow-y-auto shrink-0">
         {detailLoading && (
-          <div className="flex items-center justify-center h-full text-gray-400 text-sm">Loading...</div>
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">Loading...</div>
         )}
         {!detailLoading && !selectedRun && (
-          <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Select a run to view details
           </div>
         )}
         {!detailLoading && selectedRun && (
           <div className="p-4 space-y-4">
             <div>
-              <h3 className="text-sm font-semibold text-gray-900 mb-1">{selectedRun.name}</h3>
+              <h3 className="text-sm font-semibold text-foreground mb-1">{selectedRun.name}</h3>
               <div className="flex gap-2 text-xs">
                 <span className={`px-2 py-0.5 rounded font-medium ${statusBadge(selectedRun.status)}`}>
                   {selectedRun.status}
                 </span>
-                <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded">{selectedRun.run_type}</span>
+                <span className="px-2 py-0.5 bg-muted text-card-foreground rounded">{selectedRun.run_type}</span>
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
-                <span className="text-gray-500 block">Run ID</span>
-                <span className="text-gray-800 font-mono truncate block">{selectedRun.run_id}</span>
+                <span className="text-muted-foreground block">Run ID</span>
+                <span className="text-foreground font-mono truncate block">{selectedRun.run_id}</span>
               </div>
               <div>
-                <span className="text-gray-500 block">Trace ID</span>
-                <span className="text-gray-800 font-mono truncate block">{selectedRun.trace_id || '-'}</span>
+                <span className="text-muted-foreground block">Trace ID</span>
+                <span className="text-foreground font-mono truncate block">{selectedRun.trace_id || '-'}</span>
               </div>
               <div>
-                <span className="text-gray-500 block">Latency</span>
-                <span className="text-gray-800">{formatLatency(selectedRun.latency_ms)}</span>
+                <span className="text-muted-foreground block">Latency</span>
+                <span className="text-foreground">{formatLatency(selectedRun.latency_ms)}</span>
               </div>
               <div>
-                <span className="text-gray-500 block">Tokens</span>
-                <span className="text-gray-800">
+                <span className="text-muted-foreground block">Tokens</span>
+                <span className="text-foreground">
                   {selectedRun.total_tokens !== null ? selectedRun.total_tokens : '-'}
                 </span>
               </div>
               <div>
-                <span className="text-gray-500 block">Start</span>
-                <span className="text-gray-800">{formatTime(selectedRun.start_time)}</span>
+                <span className="text-muted-foreground block">Start</span>
+                <span className="text-foreground">{formatTime(selectedRun.start_time)}</span>
               </div>
               <div>
-                <span className="text-gray-500 block">End</span>
-                <span className="text-gray-800">{selectedRun.end_time ? formatTime(selectedRun.end_time) : '-'}</span>
+                <span className="text-muted-foreground block">End</span>
+                <span className="text-foreground">{selectedRun.end_time ? formatTime(selectedRun.end_time) : '-'}</span>
               </div>
             </div>
 
             {/* Input */}
             <div>
-              <h4 className="text-xs font-medium text-gray-500 uppercase mb-1">Input</h4>
-              <pre className="text-xs bg-gray-50 rounded p-2 overflow-x-auto text-gray-700 max-h-40 overflow-y-auto font-mono">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase mb-1">Input</h4>
+              <pre className="text-xs bg-surface rounded p-2 overflow-x-auto text-card-foreground max-h-40 overflow-y-auto font-mono">
                 {tryFormatJson(selectedRun.input)}
               </pre>
             </div>
@@ -259,8 +259,8 @@ export default function Traces() {
             {/* Output */}
             {selectedRun.output && (
               <div>
-                <h4 className="text-xs font-medium text-gray-500 uppercase mb-1">Output</h4>
-                <pre className="text-xs bg-gray-50 rounded p-2 overflow-x-auto text-gray-700 max-h-40 overflow-y-auto font-mono">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase mb-1">Output</h4>
+                <pre className="text-xs bg-surface rounded p-2 overflow-x-auto text-card-foreground max-h-40 overflow-y-auto font-mono">
                   {tryFormatJson(selectedRun.output)}
                 </pre>
               </div>
@@ -269,8 +269,8 @@ export default function Traces() {
             {/* Error */}
             {selectedRun.error && (
               <div>
-                <h4 className="text-xs font-medium text-gray-500 uppercase mb-1">Error</h4>
-                <pre className="text-xs bg-red-50 rounded p-2 overflow-x-auto text-red-700 max-h-40 overflow-y-auto font-mono">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase mb-1">Error</h4>
+                <pre className="text-xs bg-destructive/10 rounded p-2 overflow-x-auto text-destructive max-h-40 overflow-y-auto font-mono">
                   {selectedRun.error}
                 </pre>
               </div>
@@ -278,8 +278,8 @@ export default function Traces() {
 
             {/* Metadata */}
             <div>
-              <h4 className="text-xs font-medium text-gray-500 uppercase mb-1">Metadata</h4>
-              <pre className="text-xs bg-gray-50 rounded p-2 overflow-x-auto text-gray-700 max-h-32 overflow-y-auto font-mono">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase mb-1">Metadata</h4>
+              <pre className="text-xs bg-surface rounded p-2 overflow-x-auto text-card-foreground max-h-32 overflow-y-auto font-mono">
                 {tryFormatJson(selectedRun.metadata)}
               </pre>
             </div>
@@ -287,7 +287,7 @@ export default function Traces() {
             {/* Trace Tree */}
             {traceRuns.length > 1 && (
               <div>
-                <h4 className="text-xs font-medium text-gray-500 uppercase mb-2">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase mb-2">
                   Trace Tree ({traceRuns.length} runs)
                 </h4>
                 <TraceTree
@@ -342,7 +342,7 @@ function TraceTree({
         <div
           onClick={() => onSelect(run)}
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
-          className={`flex items-center gap-2 py-1.5 cursor-pointer rounded text-xs hover:bg-gray-100 ${
+          className={`flex items-center gap-2 py-1.5 cursor-pointer rounded text-xs hover:bg-muted ${
             isSelected ? 'bg-blue-50 font-medium' : ''
           }`}
         >
@@ -351,13 +351,13 @@ function TraceTree({
             run.status === 'error' ? 'bg-red-500' :
             'bg-blue-500'
           }`} />
-          <span className="text-gray-700 truncate">{run.name}</span>
-          <span className="text-gray-400 ml-auto shrink-0">{run.run_type}</span>
+          <span className="text-card-foreground truncate">{run.name}</span>
+          <span className="text-muted-foreground ml-auto shrink-0">{run.run_type}</span>
         </div>
         {children.map((child) => renderNode(child, depth + 1))}
       </div>
     );
   }
 
-  return <div className="border border-gray-200 rounded-lg p-1">{roots.map((r) => renderNode(r, 0))}</div>;
+  return <div className="border border-border rounded-lg p-1">{roots.map((r) => renderNode(r, 0))}</div>;
 }

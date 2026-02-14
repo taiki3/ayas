@@ -29,7 +29,7 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
   return (
     <button
       onClick={handleCopy}
-      className="text-xs text-gray-500 hover:text-gray-700 border border-gray-200 rounded px-2 py-1"
+      className="text-xs text-muted-foreground hover:text-card-foreground border border-border rounded px-2 py-1"
     >
       {copied ? 'Copied!' : label}
     </button>
@@ -48,7 +48,7 @@ function DownloadButton({ filename, content, label = 'Download' }: { filename: s
   return (
     <button
       onClick={handleDownload}
-      className="text-xs text-gray-500 hover:text-gray-700 border border-gray-200 rounded px-2 py-1"
+      className="text-xs text-muted-foreground hover:text-card-foreground border border-border rounded px-2 py-1"
     >
       {label}
     </button>
@@ -270,17 +270,17 @@ export default function Pipeline() {
   return (
     <div className="h-full flex">
       {/* Left Panel */}
-      <div className="w-[280px] shrink-0 border-r border-gray-200 bg-gray-50 overflow-y-auto p-4 space-y-4">
-        <h2 className="text-sm font-semibold text-gray-900">Hypothesis Pipeline</h2>
+      <div className="w-[280px] shrink-0 border-r border-border bg-surface overflow-y-auto p-4 space-y-4">
+        <h2 className="text-sm font-semibold text-foreground">Hypothesis Pipeline</h2>
 
         {/* Mode select */}
         <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">MODE</label>
+          <label className="block text-xs font-medium text-card-foreground mb-1">MODE</label>
           <select
             value={mode}
             onChange={(e) => setMode(e.target.value as 'llm' | 'manual')}
             disabled={loading}
-            className="w-full text-sm border border-gray-300 rounded-md px-2 py-1.5 bg-white"
+            className="w-full text-sm border border-border rounded-md px-2 py-1.5 bg-card"
           >
             <option value="llm">LLM (3-step auto)</option>
             <option value="manual">Manual (STEP 3 only)</option>
@@ -289,8 +289,8 @@ export default function Pipeline() {
 
         {/* NEEDS textarea */}
         <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">
-            NEEDS <span className="text-gray-400">(empty = demo)</span>
+          <label className="block text-xs font-medium text-card-foreground mb-1">
+            NEEDS <span className="text-muted-foreground">(empty = demo)</span>
           </label>
           <textarea
             value={needsText}
@@ -298,14 +298,14 @@ export default function Pipeline() {
             disabled={loading}
             rows={6}
             placeholder="target_specification.txt の内容..."
-            className="w-full text-xs border border-gray-300 rounded-md px-2 py-1.5 resize-y font-mono"
+            className="w-full text-xs border border-border rounded-md px-2 py-1.5 resize-y font-mono"
           />
         </div>
 
         {/* SEEDS textarea */}
         <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">
-            SEEDS <span className="text-gray-400">(empty = demo)</span>
+          <label className="block text-xs font-medium text-card-foreground mb-1">
+            SEEDS <span className="text-muted-foreground">(empty = demo)</span>
           </label>
           <textarea
             value={seedsText}
@@ -313,14 +313,14 @@ export default function Pipeline() {
             disabled={loading}
             rows={6}
             placeholder="technical_assets.json の内容..."
-            className="w-full text-xs border border-gray-300 rounded-md px-2 py-1.5 resize-y font-mono"
+            className="w-full text-xs border border-border rounded-md px-2 py-1.5 resize-y font-mono"
           />
         </div>
 
         {/* LLM mode: hypothesis count slider */}
         {!isManual && (
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">仮説数</label>
+            <label className="block text-xs font-medium text-card-foreground mb-1">仮説数</label>
             <div className="flex items-center gap-2">
               <input
                 type="range"
@@ -331,7 +331,7 @@ export default function Pipeline() {
                 className="flex-1"
                 disabled={loading}
               />
-              <span className="text-sm font-mono text-gray-900 w-6 text-center">{hypothesisCount}</span>
+              <span className="text-sm font-mono text-foreground w-6 text-center">{hypothesisCount}</span>
             </div>
           </div>
         )}
@@ -339,7 +339,7 @@ export default function Pipeline() {
         {/* Manual mode: hypothesis titles */}
         {isManual && (
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">仮説タイトル</label>
+            <label className="block text-xs font-medium text-card-foreground mb-1">仮説タイトル</label>
             <div className="space-y-2">
               {manualHypotheses.map((title, i) => (
                 <div key={i} className="flex items-center gap-1">
@@ -349,13 +349,13 @@ export default function Pipeline() {
                     onChange={(e) => updateManualHypothesis(i, e.target.value)}
                     disabled={loading}
                     placeholder={`仮説 ${i + 1}`}
-                    className="flex-1 text-xs border border-gray-300 rounded px-2 py-1"
+                    className="flex-1 text-xs border border-border rounded px-2 py-1"
                   />
                   {manualHypotheses.length > 1 && (
                     <button
                       onClick={() => removeManualHypothesis(i)}
                       disabled={loading}
-                      className="text-gray-400 hover:text-red-500 text-xs px-1"
+                      className="text-muted-foreground hover:text-red-500 text-xs px-1"
                     >
                       x
                     </button>
@@ -373,13 +373,13 @@ export default function Pipeline() {
           </div>
         )}
 
-        <hr className="border-gray-200" />
+        <hr className="border-border" />
 
         {/* Run / Cancel */}
         {!loading ? (
           <button
             onClick={handleStart}
-            className="w-full px-4 py-2 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-800"
+            className="w-full px-4 py-2 bg-primary text-primary-foreground text-sm rounded-lg hover:opacity-90"
           >
             Run Pipeline
           </button>
@@ -398,8 +398,8 @@ export default function Pipeline() {
         <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
           {/* Error */}
           {error && (
-            <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-sm text-red-700">{error}</p>
+            <div className="px-4 py-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+              <p className="text-sm text-destructive">{error}</p>
             </div>
           )}
 
@@ -421,31 +421,31 @@ export default function Pipeline() {
                     key={step}
                     className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${
                       isSkipped
-                        ? 'border-gray-200 bg-gray-100 opacity-50'
+                        ? 'border-border bg-muted opacity-50'
                         : isActive
                         ? 'border-blue-300 bg-blue-50'
                         : completed
                         ? 'border-green-200 bg-green-50'
-                        : 'border-gray-200 bg-gray-50'
+                        : 'border-border bg-surface'
                     }`}
                   >
                     <div
                       className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
                         isSkipped
-                          ? 'bg-gray-300 text-gray-500'
+                          ? 'bg-muted text-muted-foreground'
                           : isActive
                           ? 'bg-blue-600 text-white'
                           : completed
                           ? 'bg-green-600 text-white'
-                          : 'bg-gray-300 text-gray-600'
+                          : 'bg-muted text-card-foreground'
                       }`}
                     >
                       {isSkipped ? '\u2014' : completed ? '\u2713' : step}
                     </div>
                     <div className="flex-1">
-                      <div className={`text-sm font-medium ${isSkipped ? 'text-gray-400' : 'text-gray-900'}`}>
+                      <div className={`text-sm font-medium ${isSkipped ? 'text-muted-foreground' : 'text-foreground'}`}>
                         STEP {step}: {stepLabels[step]}
-                        {isSkipped && <span className="ml-2 text-xs text-gray-400">(skipped)</span>}
+                        {isSkipped && <span className="ml-2 text-xs text-muted-foreground">(skipped)</span>}
                       </div>
                       {isActive && stepDescription && (
                         <div className="text-xs text-blue-600 mt-0.5 flex items-center gap-1">
@@ -465,14 +465,14 @@ export default function Pipeline() {
 
           {/* STEP 1 result (collapsible) */}
           {step1Text && (
-            <div className="border border-gray-200 rounded-lg bg-white">
+            <div className="border border-border rounded-lg bg-card">
               <div className="flex items-center justify-between px-4 py-3">
                 <button
                   onClick={() => setStep1Open(!step1Open)}
-                  className="flex-1 text-left text-sm font-medium text-gray-700 hover:text-gray-900"
+                  className="flex-1 text-left text-sm font-medium text-card-foreground hover:text-foreground"
                 >
                   <span>STEP 1: 仮説生成レポート ({step1Text.length.toLocaleString()} chars)</span>
-                  <span className="text-gray-400 ml-2">{step1Open ? '\u25B2' : '\u25BC'}</span>
+                  <span className="text-muted-foreground ml-2">{step1Open ? '\u25B2' : '\u25BC'}</span>
                 </button>
                 <div className="flex items-center gap-2 ml-2">
                   <CopyButton text={step1Text} />
@@ -480,7 +480,7 @@ export default function Pipeline() {
                 </div>
               </div>
               {step1Open && (
-                <div className="px-6 pb-6 prose prose-sm max-w-none text-gray-800 border-t border-gray-100">
+                <div className="px-6 pb-6 prose prose-sm max-w-none text-foreground border-t border-border">
                   <Markdown>{step1Text}</Markdown>
                 </div>
               )}
@@ -491,13 +491,13 @@ export default function Pipeline() {
           {hypotheses.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-700">
+                <h3 className="text-sm font-semibold text-card-foreground">
                   {isManual ? 'Manual仮説' : 'STEP 2: 抽出された仮説'}
                 </h3>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setJsonViewOpen(!jsonViewOpen)}
-                    className="text-xs text-gray-500 hover:text-gray-700 border border-gray-200 rounded px-2 py-1"
+                    className="text-xs text-muted-foreground hover:text-card-foreground border border-border rounded px-2 py-1"
                   >
                     {jsonViewOpen ? 'Card View' : 'JSON View'}
                   </button>
@@ -508,8 +508,8 @@ export default function Pipeline() {
               </div>
 
               {jsonViewOpen && hypothesesJson ? (
-                <div className="border border-gray-200 rounded-lg bg-white p-4">
-                  <pre className="text-xs text-gray-800 overflow-x-auto whitespace-pre-wrap font-mono">
+                <div className="border border-border rounded-lg bg-card p-4">
+                  <pre className="text-xs text-foreground overflow-x-auto whitespace-pre-wrap font-mono">
                     {JSON.stringify(hypothesesJson, null, 2)}
                   </pre>
                 </div>
@@ -520,50 +520,50 @@ export default function Pipeline() {
                     return (
                       <div
                         key={h.index}
-                        className="border border-gray-200 rounded-lg bg-white"
+                        className="border border-border rounded-lg bg-card"
                       >
                         <button
                           onClick={() => toggleHypothesisDetail(h.index)}
-                          className="w-full flex items-center gap-4 px-4 py-3 hover:bg-gray-50 text-left"
+                          className="w-full flex items-center gap-4 px-4 py-3 hover:bg-surface text-left"
                         >
                           <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm font-bold shrink-0">
                             {h.index + 1}
                           </div>
                           <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium text-gray-900 truncate">{h.title}</div>
+                            <div className="text-sm font-medium text-foreground truncate">{h.title}</div>
                             <div className="flex items-center gap-2 mt-0.5">
                               {h.cap_id_fingerprint && (
-                                <span className="text-[10px] font-mono text-gray-400">{h.cap_id_fingerprint}</span>
+                                <span className="text-[10px] font-mono text-muted-foreground">{h.cap_id_fingerprint}</span>
                               )}
                               {h.verdict_tag && (
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                                   h.verdict_tag === 'GO' ? 'bg-green-100 text-green-700'
                                   : h.verdict_tag === 'PIVOT' ? 'bg-yellow-100 text-yellow-700'
-                                  : 'bg-gray-100 text-gray-600'
+                                  : 'bg-muted text-card-foreground'
                                 }`}>
                                   {h.verdict_tag}
                                 </span>
                               )}
                             </div>
                           </div>
-                          <div className="text-xs font-mono text-gray-500 shrink-0">
+                          <div className="text-xs font-mono text-muted-foreground shrink-0">
                             {h.score > 0 ? `score: ${h.score.toFixed(2)}` : ''}
                           </div>
-                          <span className="text-gray-400 text-xs shrink-0">
+                          <span className="text-muted-foreground text-xs shrink-0">
                             {isDetailOpen ? '\u25B2' : '\u25BC'}
                           </span>
                         </button>
                         {isDetailOpen && (
-                          <div className="px-4 pb-3 border-t border-gray-100 space-y-2 text-xs text-gray-600">
+                          <div className="px-4 pb-3 border-t border-border space-y-2 text-xs text-card-foreground">
                             {h.physical_contradiction && (
                               <div>
-                                <span className="font-medium text-gray-700">Physical Contradiction: </span>
+                                <span className="font-medium text-card-foreground">Physical Contradiction: </span>
                                 {h.physical_contradiction}
                               </div>
                             )}
                             {h.verdict_reason && (
                               <div>
-                                <span className="font-medium text-gray-700">Verdict Reason: </span>
+                                <span className="font-medium text-card-foreground">Verdict Reason: </span>
                                 {h.verdict_reason}
                               </div>
                             )}
@@ -580,13 +580,13 @@ export default function Pipeline() {
           {/* STEP 3 results (collapsible per hypothesis) */}
           {step3Results.length > 0 && (
             <div className="space-y-3">
-              <h3 className="text-sm font-semibold text-gray-700">STEP 3: 深掘りレポート</h3>
+              <h3 className="text-sm font-semibold text-card-foreground">STEP 3: 深掘りレポート</h3>
               {step3Results.map((r, i) => (
-                <div key={i} className={`border rounded-lg bg-white ${r.error ? 'border-red-200' : 'border-gray-200'}`}>
+                <div key={i} className={`border rounded-lg bg-card ${r.error ? 'border-red-200' : 'border-border'}`}>
                   <div className="flex items-center justify-between px-4 py-3">
                     <button
                       onClick={() => !r.loading && toggleStep3(i)}
-                      className={`flex-1 text-left text-sm font-medium hover:text-gray-900 ${r.loading ? 'cursor-default' : ''} ${r.error ? 'text-red-700' : 'text-gray-700'}`}
+                      className={`flex-1 text-left text-sm font-medium hover:text-foreground ${r.loading ? 'cursor-default' : ''} ${r.error ? 'text-destructive' : 'text-card-foreground'}`}
                     >
                       <span className="truncate flex items-center gap-2">
                         [{i + 1}] {r.title}
@@ -594,7 +594,7 @@ export default function Pipeline() {
                           <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
                         )}
                       </span>
-                      <span className="text-gray-400 ml-2">
+                      <span className="text-muted-foreground ml-2">
                         {r.loading ? '' : r.error ? '\u2717' : step3Open.has(i) ? '\u25B2' : '\u25BC'}
                       </span>
                     </button>
@@ -611,7 +611,7 @@ export default function Pipeline() {
                     </div>
                   )}
                   {!r.loading && r.text && step3Open.has(i) && (
-                    <div className="px-6 pb-6 prose prose-sm max-w-none text-gray-800 border-t border-gray-100">
+                    <div className="px-6 pb-6 prose prose-sm max-w-none text-foreground border-t border-border">
                       <Markdown>{r.text}</Markdown>
                     </div>
                   )}

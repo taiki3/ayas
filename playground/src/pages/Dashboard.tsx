@@ -67,25 +67,25 @@ export default function Dashboard() {
   const typeDistribution = buildTypeDistribution(runs);
 
   return (
-    <div className="h-full overflow-y-auto bg-gray-50">
+    <div className="h-full overflow-y-auto bg-surface">
       <div className="max-w-6xl mx-auto px-6 py-6 space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Dashboard</h2>
+          <h2 className="text-lg font-semibold text-foreground">Dashboard</h2>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
-              <label className="text-xs font-medium text-gray-500 uppercase">Project</label>
+              <label className="text-xs font-medium text-muted-foreground uppercase">Project</label>
               <input
                 type="text"
                 value={project}
                 onChange={(e) => setProject(e.target.value)}
-                className="px-2 py-1.5 border border-gray-300 rounded-md text-sm w-32 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="px-2 py-1.5 border border-border rounded-md text-sm w-32 focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
             <button
               onClick={refresh}
               disabled={loading}
-              className="px-3 py-1.5 bg-gray-900 text-white text-sm rounded-md hover:bg-gray-800 disabled:opacity-50"
+              className="px-3 py-1.5 bg-primary text-primary-foreground text-sm rounded-md hover:opacity-90 disabled:opacity-50"
             >
               {loading ? 'Loading...' : 'Refresh'}
             </button>
@@ -93,8 +93,8 @@ export default function Dashboard() {
         </div>
 
         {error && (
-          <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-lg">
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="px-4 py-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+            <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
 
@@ -123,24 +123,24 @@ export default function Dashboard() {
 
         {/* Latency Percentiles */}
         {stats && (
-          <div className="bg-white border border-gray-200 rounded-lg p-4">
-            <h3 className="text-xs font-medium text-gray-500 uppercase mb-3">Latency Percentiles</h3>
+          <div className="bg-card border border-border rounded-lg p-4">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase mb-3">Latency Percentiles</h3>
             <div className="grid grid-cols-4 gap-4">
               <div>
-                <span className="text-xs text-gray-500">P50</span>
-                <span className="block text-lg font-semibold text-gray-900">{formatLatency(stats.latency.p50)}</span>
+                <span className="text-xs text-muted-foreground">P50</span>
+                <span className="block text-lg font-semibold text-foreground">{formatLatency(stats.latency.p50)}</span>
               </div>
               <div>
-                <span className="text-xs text-gray-500">P90</span>
-                <span className="block text-lg font-semibold text-gray-900">{formatLatency(stats.latency.p90)}</span>
+                <span className="text-xs text-muted-foreground">P90</span>
+                <span className="block text-lg font-semibold text-foreground">{formatLatency(stats.latency.p90)}</span>
               </div>
               <div>
-                <span className="text-xs text-gray-500">P95</span>
-                <span className="block text-lg font-semibold text-gray-900">{formatLatency(stats.latency.p95)}</span>
+                <span className="text-xs text-muted-foreground">P95</span>
+                <span className="block text-lg font-semibold text-foreground">{formatLatency(stats.latency.p95)}</span>
               </div>
               <div>
-                <span className="text-xs text-gray-500">P99</span>
-                <span className="block text-lg font-semibold text-gray-900">{formatLatency(stats.latency.p99)}</span>
+                <span className="text-xs text-muted-foreground">P99</span>
+                <span className="block text-lg font-semibold text-foreground">{formatLatency(stats.latency.p99)}</span>
               </div>
             </div>
           </div>
@@ -149,10 +149,10 @@ export default function Dashboard() {
         {/* Charts */}
         <div className="grid grid-cols-2 gap-4">
           {/* Time-series chart */}
-          <div className="bg-white border border-gray-200 rounded-lg p-4">
-            <h3 className="text-xs font-medium text-gray-500 uppercase mb-3">Runs Over Time</h3>
+          <div className="bg-card border border-border rounded-lg p-4">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase mb-3">Runs Over Time</h3>
             {timeSeriesData.length === 0 ? (
-              <p className="text-sm text-gray-400 text-center py-8">No data available</p>
+              <p className="text-sm text-muted-foreground text-center py-8">No data available</p>
             ) : (
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={timeSeriesData}>
@@ -169,10 +169,10 @@ export default function Dashboard() {
           </div>
 
           {/* Type distribution */}
-          <div className="bg-white border border-gray-200 rounded-lg p-4">
-            <h3 className="text-xs font-medium text-gray-500 uppercase mb-3">Run Type Distribution</h3>
+          <div className="bg-card border border-border rounded-lg p-4">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase mb-3">Run Type Distribution</h3>
             {typeDistribution.length === 0 ? (
-              <p className="text-sm text-gray-400 text-center py-8">No data available</p>
+              <p className="text-sm text-muted-foreground text-center py-8">No data available</p>
             ) : (
               <ResponsiveContainer width="100%" height={220}>
                 <BarChart data={typeDistribution}>
@@ -208,13 +208,13 @@ function SummaryCard({
       ? 'text-yellow-600'
       : color === 'red'
         ? 'text-red-600'
-        : 'text-gray-900';
+        : 'text-foreground';
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-4">
-      <span className="text-xs font-medium text-gray-500 uppercase">{label}</span>
+    <div className="bg-card border border-border rounded-lg p-4">
+      <span className="text-xs font-medium text-muted-foreground uppercase">{label}</span>
       <div className={`text-2xl font-semibold mt-1 ${colorClass}`}>{value}</div>
-      {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
+      {sub && <p className="text-xs text-muted-foreground mt-0.5">{sub}</p>}
     </div>
   );
 }

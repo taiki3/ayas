@@ -91,14 +91,14 @@ export default function Chat() {
   return (
     <div className="flex h-full">
       {/* Settings Panel */}
-      <aside className="w-[280px] border-r border-gray-200 bg-white p-4 overflow-y-auto shrink-0">
+      <aside className="w-[280px] border-r border-border bg-card p-4 overflow-y-auto shrink-0">
         <div className="space-y-5">
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Provider</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Provider</label>
             <select
               value={provider}
               onChange={(e) => setProvider(e.target.value as Provider)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm bg-card focus:outline-none focus:ring-2 focus:ring-ring"
             >
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
@@ -107,11 +107,11 @@ export default function Chat() {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Model</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Model</label>
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm bg-card focus:outline-none focus:ring-2 focus:ring-ring"
             >
               {PROVIDER_MODELS[provider].map((m) => (
                 <option key={m} value={m}>{m}</option>
@@ -120,7 +120,7 @@ export default function Chat() {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">
               Temperature: {temperature.toFixed(1)}
             </label>
             <input
@@ -130,34 +130,34 @@ export default function Chat() {
               step="0.1"
               value={temperature}
               onChange={(e) => setTemperature(parseFloat(e.target.value))}
-              className="w-full accent-gray-900"
+              className="w-full accent-primary"
             />
-            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+            <div className="flex justify-between text-xs text-muted-foreground mt-0.5">
               <span>0.0</span>
               <span>2.0</span>
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Max Tokens</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">Max Tokens</label>
             <input
               type="number"
               min="1"
               max="128000"
               value={maxTokens}
               onChange={(e) => setMaxTokens(parseInt(e.target.value) || 1024)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">System Prompt</label>
+            <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">System Prompt</label>
             <textarea
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
               placeholder="You are a helpful assistant..."
               rows={4}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
             />
           </div>
         </div>
@@ -167,15 +167,15 @@ export default function Chat() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Error Banner */}
         {error && (
-          <div className="px-6 py-3 bg-red-50 border-b border-red-200">
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="px-6 py-3 bg-destructive/10 border-b border-destructive/30">
+            <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {messages.length === 0 && !loading && (
-            <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
               Send a message to start chatting
             </div>
           )}
@@ -185,24 +185,24 @@ export default function Chat() {
                 <div
                   className={`max-w-[80%] rounded-lg px-4 py-2.5 ${
                     msg.role === 'user'
-                      ? 'bg-gray-900 text-white'
-                      : 'bg-white border border-gray-200 text-gray-800'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-foreground'
                   }`}
                 >
                   <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
                   {msg.role === 'ai' && msg.tokensIn !== undefined && (
-                    <p className="text-xs text-gray-400 mt-1.5">{msg.tokensIn} in / {msg.tokensOut} out</p>
+                    <p className="text-xs text-muted-foreground mt-1.5">{msg.tokensIn} in / {msg.tokensOut} out</p>
                   )}
                 </div>
               </div>
             ))}
             {loading && (
               <div className="flex justify-start">
-                <div className="bg-white border border-gray-200 rounded-lg px-4 py-2.5">
+                <div className="bg-muted rounded-lg px-4 py-2.5">
                   <div className="flex gap-1">
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
-                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                    <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce [animation-delay:0ms]" />
+                    <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce [animation-delay:150ms]" />
+                    <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce [animation-delay:300ms]" />
                   </div>
                 </div>
               </div>
@@ -212,7 +212,7 @@ export default function Chat() {
         </div>
 
         {/* Input */}
-        <div className="border-t border-gray-200 bg-white px-6 py-4 shrink-0">
+        <div className="border-t border-border bg-card px-6 py-4 shrink-0">
           <div className="max-w-3xl mx-auto flex gap-3">
             <textarea
               ref={inputRef}
@@ -221,12 +221,12 @@ export default function Chat() {
               onKeyDown={handleKeyDown}
               placeholder="Send a message... (Shift+Enter for newline)"
               rows={1}
-              className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="flex-1 px-4 py-2.5 border border-border rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
             />
             <button
               onClick={handleSend}
               disabled={loading || !input.trim()}
-              className="px-5 py-2.5 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+              className="px-5 py-2.5 bg-primary text-primary-foreground text-sm rounded-lg hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
             >
               {loading ? (
                 <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">

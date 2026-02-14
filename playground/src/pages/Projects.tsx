@@ -66,13 +66,13 @@ export default function Projects() {
   return (
     <div className="flex h-full">
       {/* Project List */}
-      <aside className="w-[240px] border-r border-gray-200 bg-white flex flex-col shrink-0">
-        <div className="px-4 py-3 border-b border-gray-200">
-          <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wide">Projects</h2>
+      <aside className="w-[240px] border-r border-border bg-card flex flex-col shrink-0">
+        <div className="px-4 py-3 border-b border-border">
+          <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Projects</h2>
         </div>
         <div className="flex-1 overflow-y-auto p-2">
           {projects.length === 0 && !loading && (
-            <p className="text-xs text-gray-400 text-center mt-4">No projects found</p>
+            <p className="text-xs text-muted-foreground text-center mt-4">No projects found</p>
           )}
           {projects.map((proj) => (
             <button
@@ -80,18 +80,18 @@ export default function Projects() {
               onClick={() => setSelectedProject(proj)}
               className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
                 selectedProject === proj
-                  ? 'bg-gray-900 text-white'
-                  : 'text-gray-700 hover:bg-gray-100'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-card-foreground hover:bg-muted'
               }`}
             >
               {proj}
             </button>
           ))}
         </div>
-        <div className="px-4 py-3 border-t border-gray-200">
+        <div className="px-4 py-3 border-t border-border">
           <button
             onClick={fetchProjects}
-            className="w-full px-3 py-1.5 text-xs text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
+            className="w-full px-3 py-1.5 text-xs text-card-foreground border border-border rounded-md hover:bg-surface"
           >
             Refresh
           </button>
@@ -101,16 +101,16 @@ export default function Projects() {
       {/* Project Detail */}
       <div className="flex-1 flex flex-col min-w-0">
         {!selectedProject && (
-          <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             Select a project from the sidebar
           </div>
         )}
         {selectedProject && (
           <>
             {/* Header */}
-            <div className="px-6 py-4 border-b border-gray-200 bg-white shrink-0">
-              <h2 className="text-lg font-semibold text-gray-900">{selectedProject}</h2>
-              <div className="flex gap-4 mt-2 text-sm text-gray-600">
+            <div className="px-6 py-4 border-b border-border bg-card shrink-0">
+              <h2 className="text-lg font-semibold text-foreground">{selectedProject}</h2>
+              <div className="flex gap-4 mt-2 text-sm text-card-foreground">
                 <span>{runs.length} runs</span>
                 <span className="text-green-600">{successCount} success</span>
                 <span className="text-red-600">{errorCount} errors</span>
@@ -119,20 +119,20 @@ export default function Projects() {
             </div>
 
             {error && (
-              <div className="px-6 py-3 bg-red-50 border-b border-red-200">
-                <p className="text-sm text-red-700">{error}</p>
+              <div className="px-6 py-3 bg-destructive/10 border-b border-destructive/30">
+                <p className="text-sm text-destructive">{error}</p>
               </div>
             )}
 
             {/* Tabs */}
-            <div className="px-6 pt-3 border-b border-gray-200 bg-white shrink-0">
+            <div className="px-6 pt-3 border-b border-border bg-card shrink-0">
               <div className="flex gap-4">
                 <button
                   onClick={() => setTab('runs')}
                   className={`pb-2 text-sm border-b-2 transition-colors ${
                     tab === 'runs'
-                      ? 'border-gray-900 text-gray-900 font-medium'
-                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                      ? 'border-primary text-foreground font-medium'
+                      : 'border-transparent text-muted-foreground hover:text-card-foreground'
                   }`}
                 >
                   Runs
@@ -141,8 +141,8 @@ export default function Projects() {
                   onClick={() => setTab('feedback')}
                   className={`pb-2 text-sm border-b-2 transition-colors ${
                     tab === 'feedback'
-                      ? 'border-gray-900 text-gray-900 font-medium'
-                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                      ? 'border-primary text-foreground font-medium'
+                      : 'border-transparent text-muted-foreground hover:text-card-foreground'
                   }`}
                 >
                   Feedback
@@ -153,13 +153,13 @@ export default function Projects() {
             {/* Content */}
             <div className="flex-1 overflow-auto">
               {loading && (
-                <div className="flex items-center justify-center h-32 text-gray-400 text-sm">Loading...</div>
+                <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">Loading...</div>
               )}
 
               {!loading && tab === 'runs' && (
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 sticky top-0">
-                    <tr className="text-left text-xs font-medium text-gray-500 uppercase">
+                  <thead className="bg-surface sticky top-0">
+                    <tr className="text-left text-xs font-medium text-muted-foreground uppercase">
                       <th className="px-6 py-3">Name</th>
                       <th className="px-4 py-3">Type</th>
                       <th className="px-4 py-3">Status</th>
@@ -167,17 +167,17 @@ export default function Projects() {
                       <th className="px-4 py-3">Tokens</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100">
+                  <tbody className="divide-y divide-border">
                     {runs.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="px-6 py-8 text-center text-gray-400">No runs in this project</td>
+                        <td colSpan={5} className="px-6 py-8 text-center text-muted-foreground">No runs in this project</td>
                       </tr>
                     )}
                     {runs.map((run) => (
-                      <tr key={run.run_id} className="hover:bg-gray-50">
-                        <td className="px-6 py-3 font-medium text-gray-900 truncate max-w-[200px]">{run.name}</td>
+                      <tr key={run.run_id} className="hover:bg-surface">
+                        <td className="px-6 py-3 font-medium text-foreground truncate max-w-[200px]">{run.name}</td>
                         <td className="px-4 py-3">
-                          <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">{run.run_type}</span>
+                          <span className="px-2 py-0.5 bg-muted text-card-foreground rounded text-xs">{run.run_type}</span>
                         </td>
                         <td className="px-4 py-3">
                           <span className={`px-2 py-0.5 rounded text-xs font-medium ${
@@ -186,10 +186,10 @@ export default function Projects() {
                             'bg-blue-100 text-blue-700'
                           }`}>{run.status}</span>
                         </td>
-                        <td className="px-4 py-3 text-gray-600">
+                        <td className="px-4 py-3 text-card-foreground">
                           {run.latency_ms !== null ? `${run.latency_ms}ms` : '-'}
                         </td>
-                        <td className="px-4 py-3 text-gray-600">
+                        <td className="px-4 py-3 text-card-foreground">
                           {run.total_tokens !== null ? run.total_tokens : '-'}
                         </td>
                       </tr>
@@ -200,8 +200,8 @@ export default function Projects() {
 
               {!loading && tab === 'feedback' && (
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 sticky top-0">
-                    <tr className="text-left text-xs font-medium text-gray-500 uppercase">
+                  <thead className="bg-surface sticky top-0">
+                    <tr className="text-left text-xs font-medium text-muted-foreground uppercase">
                       <th className="px-6 py-3">Key</th>
                       <th className="px-4 py-3">Score</th>
                       <th className="px-4 py-3">Comment</th>
@@ -209,21 +209,21 @@ export default function Projects() {
                       <th className="px-4 py-3">Created</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100">
+                  <tbody className="divide-y divide-border">
                     {feedback.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="px-6 py-8 text-center text-gray-400">No feedback entries</td>
+                        <td colSpan={5} className="px-6 py-8 text-center text-muted-foreground">No feedback entries</td>
                       </tr>
                     )}
                     {feedback.map((fb) => (
-                      <tr key={fb.id} className="hover:bg-gray-50">
-                        <td className="px-6 py-3 font-medium text-gray-900">{fb.key}</td>
+                      <tr key={fb.id} className="hover:bg-surface">
+                        <td className="px-6 py-3 font-medium text-foreground">{fb.key}</td>
                         <td className="px-4 py-3">
                           <ScoreBadge score={fb.score} />
                         </td>
-                        <td className="px-4 py-3 text-gray-600 truncate max-w-[200px]">{fb.comment || '-'}</td>
-                        <td className="px-4 py-3 text-gray-500 font-mono text-xs truncate max-w-[120px]">{fb.run_id}</td>
-                        <td className="px-4 py-3 text-gray-500 text-xs">
+                        <td className="px-4 py-3 text-card-foreground truncate max-w-[200px]">{fb.comment || '-'}</td>
+                        <td className="px-4 py-3 text-muted-foreground font-mono text-xs truncate max-w-[120px]">{fb.run_id}</td>
+                        <td className="px-4 py-3 text-muted-foreground text-xs">
                           {new Date(fb.created_at).toLocaleString()}
                         </td>
                       </tr>

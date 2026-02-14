@@ -9,9 +9,25 @@ pub mod projects;
 pub mod research;
 pub mod runs;
 
-use axum::{Router, routing::get};
+use axum::{Router, routing::get, Json};
+use serde::Serialize;
 
 use crate::state::AppState;
+
+#[derive(Serialize)]
+struct EnvKeysResponse {
+    gemini: bool,
+    claude: bool,
+    openai: bool,
+}
+
+async fn env_keys() -> Json<EnvKeysResponse> {
+    Json(EnvKeysResponse {
+        gemini: std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.is_empty()).is_some(),
+        claude: std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty()).is_some(),
+        openai: std::env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()).is_some(),
+    })
+}
 
 pub fn api_routes(state: AppState) -> Router {
     // Stateful routes: convert Router<AppState> to Router<()> via .with_state()
@@ -31,5 +47,5 @@ pub fn api_routes(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .nest("/api", stateful.merge(stateless))
+        .nest("/api", stateful.merge(stateless).route("/env-keys", get(env_keys)))
 }

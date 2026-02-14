@@ -15,19 +15,18 @@ impl Provider {
         match self {
             Provider::Gemini => &[
                 "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
                 "gemini-2.5-pro",
-                "gemini-3.0-flash",
                 "gemini-3-flash-preview",
                 "gemini-3-pro-preview",
             ],
             Provider::Claude => &[
                 "claude-opus-4-6",
-                "claude-opus-4-5",
-                "claude-sonnet-4-5",
-                "claude-haiku-4-5",
+                "claude-opus-4-5-20251101",
+                "claude-sonnet-4-5-20250929",
+                "claude-haiku-4-5-20251001",
             ],
             Provider::OpenAI => &[
-                "gpt-5.3",
                 "gpt-5.2",
                 "gpt-5.2-pro",
             ],

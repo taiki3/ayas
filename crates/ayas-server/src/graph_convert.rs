@@ -3,9 +3,14 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use ayas_checkpoint::prelude::interrupt_output;
-use ayas_core::error::Result;
+use ayas_core::config::RunnableConfig;
+use ayas_core::error::{AyasError, Result};
 use ayas_core::message::Message;
-use ayas_core::model::{CallOptions, ChatModel};
+use ayas_core::model::{CallOptions, ChatModel, ResponseFormat};
+use ayas_core::runnable::Runnable;
+use ayas_deep_research::client::InteractionsClient;
+use ayas_deep_research::runnable::{DeepResearchInput, DeepResearchRunnable};
+use ayas_deep_research::types::ToolConfig;
 use ayas_graph::channel::ChannelSpec;
 use ayas_graph::compiled::CompiledStateGraph;
 use ayas_graph::constants::END;
@@ -21,10 +26,15 @@ use crate::types::{GraphChannelDto, GraphEdgeDto, GraphNodeDto};
 pub type GraphModelFactory =
     Arc<dyn Fn(&Provider, String, String) -> Box<dyn ChatModel> + Send + Sync>;
 
+/// Factory function type for creating InteractionsClient instances for Deep Research.
+pub type GraphResearchFactory =
+    Arc<dyn Fn(String) -> Arc<dyn InteractionsClient> + Send + Sync>;
+
 /// Context for building a graph with real LLM execution.
 pub struct GraphBuildContext {
     pub factory: GraphModelFactory,
     pub api_keys: ApiKeys,
+    pub research_factory: Option<GraphResearchFactory>,
 }
 
 /// Convert frontend graph DTOs into a compiled StateGraph (backward-compatible).
@@ -121,6 +131,20 @@ pub fn convert_to_state_graph_with_context(
                 let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
                     let config = config.clone();
                     Box::pin(async move { build_transform_node(state, &config) })
+                });
+                graph.add_node(node_fn)?;
+            }
+            "deep_research" => {
+                let config = node.config.clone().unwrap_or(Value::Null);
+                let id = node.id.clone();
+                let ctx = ctx.clone();
+
+                let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
+                    let config = config.clone();
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        build_deep_research_node(state, &config, ctx.as_deref()).await
+                    })
                 });
                 graph.add_node(node_fn)?;
             }
@@ -273,8 +297,12 @@ async fn build_llm_node(
     let temperature = config
         .get("temperature")
         .and_then(|v| v.as_f64());
+    let response_format = config
+        .get("response_format")
+        .and_then(|v| serde_json::from_value::<ResponseFormat>(v.clone()).ok());
     let options = CallOptions {
         temperature,
+        response_format,
         ..Default::default()
     };
 
@@ -284,6 +312,137 @@ async fn build_llm_node(
     let mut state = state;
     if let Value::Object(ref mut map) = state {
         map.insert(output_channel.to_string(), Value::String(response_text));
+    }
+
+    Ok(state)
+}
+
+/// Build Deep Research node logic: calls the Interactions API if context is available.
+async fn build_deep_research_node(
+    state: Value,
+    config: &Value,
+    context: Option<&GraphBuildContext>,
+) -> Result<Value> {
+    let prompt = config
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let input_channel = config
+        .get("input_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+    let output_channel = config
+        .get("output_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+    let agent = config
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("deep-research-pro-preview-12-2025");
+    let attachments_channel = config
+        .get("attachments_channel")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let Some(ctx) = context else {
+        // No context: dummy behavior (backward-compatible)
+        let mut state = state;
+        if let Value::Object(ref mut map) = state {
+            map.insert(
+                output_channel.to_string(),
+                Value::String("(deep research: no context)".to_string()),
+            );
+        }
+        return Ok(state);
+    };
+
+    let research_factory = ctx.research_factory.as_ref().ok_or_else(|| {
+        AyasError::Other("Deep Research node requires research_factory in context".to_string())
+    })?;
+
+    let api_key = ctx.api_keys.get_key_for(&Provider::Gemini).map_err(|e| {
+        AyasError::Other(format!("API key error: {e:?}"))
+    })?;
+
+    let client = (research_factory)(api_key);
+
+    // Read user input from state
+    let user_input = match state.get(input_channel) {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+
+    // Build query: apply prompt template if provided
+    let query = if prompt.is_empty() {
+        user_input
+    } else {
+        prompt.replace("{INPUT}", &user_input)
+    };
+
+    // Build attachments: first from config.attachments_text (direct text), then from state channel
+    let mut attachments: Vec<ayas_core::message::ContentPart> = Vec::new();
+
+    // Direct text attachment from node config
+    if let Some(text) = config
+        .get("attachments_text")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        attachments.push(ayas_core::message::ContentPart::Text {
+            text: text.to_string(),
+        });
+    }
+
+    // Attachments from state channel (for chaining with previous nodes)
+    if let Some(att_ch) = attachments_channel {
+        match state.get(att_ch) {
+            Some(Value::String(s)) if !s.is_empty() => {
+                attachments.push(ayas_core::message::ContentPart::Text {
+                    text: s.clone(),
+                });
+            }
+            Some(Value::Array(arr)) => {
+                attachments.extend(arr.iter().filter_map(|v| {
+                    v.as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| ayas_core::message::ContentPart::Text {
+                            text: s.to_string(),
+                        })
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    // Check for file_search_store_names in config
+    let file_search_store_names: Option<Vec<String>> = config
+        .get("file_search_store_names")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty());
+
+    let runnable = DeepResearchRunnable::new(client)
+        .with_agent(agent)
+        .with_poll_interval(std::time::Duration::from_secs(5));
+
+    let mut input = DeepResearchInput::new(query).with_attachments(attachments);
+    if let Some(names) = file_search_store_names {
+        input = input.with_tools(vec![ToolConfig::FileSearch {
+            file_search_store_names: names,
+        }]);
+    }
+    let runnable_config = RunnableConfig::default();
+
+    let output = runnable.invoke(input, &runnable_config).await?;
+
+    let mut state = state;
+    if let Value::Object(ref mut map) = state {
+        map.insert(output_channel.to_string(), Value::String(output.text));
     }
 
     Ok(state)
@@ -615,6 +774,7 @@ mod tests {
                 gemini_key: Some("test-key".into()),
                 ..Default::default()
             },
+            research_factory: None,
         };
 
         let compiled = convert_to_state_graph_with_context(
@@ -678,6 +838,7 @@ mod tests {
                 gemini_key: Some("test-key".into()),
                 ..Default::default()
             },
+            research_factory: None,
         };
 
         let compiled = convert_to_state_graph_with_context(
@@ -747,5 +908,212 @@ mod tests {
         let output = compiled.invoke(input, &config).await.unwrap();
         assert_eq!(output["value"], "test");
         assert_eq!(output["transform_applied"], "(no expression)");
+    }
+
+    // --- Deep Research node tests ---
+
+    use ayas_deep_research::mock::MockInteractionsClient;
+
+    fn mock_research_factory(text: &str) -> GraphResearchFactory {
+        let t = text.to_string();
+        Arc::new(move |_| {
+            Arc::new(MockInteractionsClient::completed(t.clone())) as Arc<dyn InteractionsClient>
+        })
+    }
+
+    #[tokio::test]
+    async fn test_deep_research_node_without_context() {
+        let mut n = node("dr_1", "deep_research");
+        n.config = Some(json!({
+            "prompt": "Research this",
+            "output_channel": "result"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "dr_1"), edge("dr_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        // No context → dummy behavior
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, None).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "(deep research: no context)");
+        assert_eq!(output["value"], "test");
+    }
+
+    #[tokio::test]
+    async fn test_deep_research_node_with_mock() {
+        let mut n = node("dr_1", "deep_research");
+        n.config = Some(json!({
+            "agent": "deep-research-pro-preview-12-2025",
+            "input_channel": "value",
+            "output_channel": "result"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "dr_1"), edge("dr_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("unused"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: Some(mock_research_factory("Deep research output")),
+        };
+
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context)).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "Explain quantum computing", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "Deep research output");
+    }
+
+    #[tokio::test]
+    async fn test_deep_research_node_prompt_template() {
+        let mut n = node("dr_1", "deep_research");
+        n.config = Some(json!({
+            "prompt": "Please research: {INPUT}",
+            "input_channel": "value",
+            "output_channel": "result"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "dr_1"), edge("dr_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("unused"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: Some(mock_research_factory("Template research result")),
+        };
+
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context)).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "quantum computing", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        // Mock returns fixed text regardless of query, but confirms the node ran
+        assert_eq!(output["result"], "Template research result");
+    }
+
+    #[tokio::test]
+    async fn test_deep_research_node_attachments() {
+        let mut n = node("dr_1", "deep_research");
+        n.config = Some(json!({
+            "input_channel": "value",
+            "output_channel": "result",
+            "attachments_channel": "context_text"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "dr_1"), edge("dr_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+            channel("context_text", "LastValue"),
+        ];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("unused"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: Some(mock_research_factory("Research with attachments")),
+        };
+
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context)).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({
+            "value": "research topic",
+            "result": "",
+            "context_text": "Some additional context"
+        });
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "Research with attachments");
+    }
+
+    #[tokio::test]
+    async fn test_deep_research_node_with_file_search_stores() {
+        let mut n = node("dr_1", "deep_research");
+        n.config = Some(json!({
+            "input_channel": "value",
+            "output_channel": "result",
+            "file_search_store_names": ["fileSearchStores/store-abc", "fileSearchStores/store-def"]
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "dr_1"), edge("dr_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("unused"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: Some(mock_research_factory("File search research result")),
+        };
+
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context)).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "topic", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "File search research result");
+    }
+
+    #[tokio::test]
+    async fn test_deep_research_node_direct_text_attachment() {
+        let mut n = node("dr_1", "deep_research");
+        n.config = Some(json!({
+            "input_channel": "value",
+            "output_channel": "result",
+            "attachments_text": "Reference material pasted directly"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "dr_1"), edge("dr_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("unused"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: Some(mock_research_factory("Research with direct text")),
+        };
+
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context)).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "topic", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "Research with direct text");
     }
 }

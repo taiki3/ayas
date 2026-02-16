@@ -147,6 +147,57 @@ pub struct StreamEvent {
     pub interaction: Option<Interaction>,
 }
 
+/// File Search Store metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearchStore {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub active_documents_count: Option<String>,
+    #[serde(default)]
+    pub pending_documents_count: Option<String>,
+    #[serde(default)]
+    pub failed_documents_count: Option<String>,
+}
+
+/// Uploaded file metadata (from Files API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedFile {
+    pub name: String,
+    #[serde(default)]
+    pub uri: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub mime_type: String,
+}
+
+/// Wrapper for Files API upload response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileResponse {
+    pub file: UploadedFile,
+}
+
+/// Long-running operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Operation {
+    pub name: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub error: Option<OperationError>,
+}
+
+/// Operation error details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationError {
+    pub code: i32,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +321,71 @@ mod tests {
             deserialized.delta.as_ref().unwrap().text.as_deref(),
             Some("Hello world")
         );
+    }
+
+    #[test]
+    fn file_search_store_json() {
+        let json = r#"{
+            "name": "fileSearchStores/abc123",
+            "displayName": "my-store",
+            "activeDocumentsCount": "2",
+            "pendingDocumentsCount": "0",
+            "failedDocumentsCount": "0"
+        }"#;
+        let store: FileSearchStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.name, "fileSearchStores/abc123");
+        assert_eq!(store.display_name, "my-store");
+        assert_eq!(store.active_documents_count.as_deref(), Some("2"));
+        assert_eq!(store.pending_documents_count.as_deref(), Some("0"));
+
+        // Roundtrip
+        let serialized = serde_json::to_string(&store).unwrap();
+        let deserialized: FileSearchStore = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.name, store.name);
+    }
+
+    #[test]
+    fn uploaded_file_json() {
+        let json = r#"{
+            "name": "files/abc123",
+            "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc123",
+            "displayName": "test.md",
+            "mimeType": "text/markdown"
+        }"#;
+        let file: UploadedFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.name, "files/abc123");
+        assert_eq!(file.display_name, "test.md");
+        assert_eq!(file.mime_type, "text/markdown");
+    }
+
+    #[test]
+    fn operation_json_done() {
+        let json = r#"{"name": "operations/op1", "done": true}"#;
+        let op: Operation = serde_json::from_str(json).unwrap();
+        assert_eq!(op.name, "operations/op1");
+        assert!(op.done);
+        assert!(op.error.is_none());
+    }
+
+    #[test]
+    fn operation_json_with_error() {
+        let json = r#"{
+            "name": "operations/op2",
+            "done": true,
+            "error": {"code": 400, "message": "bad request"}
+        }"#;
+        let op: Operation = serde_json::from_str(json).unwrap();
+        assert!(op.done);
+        let err = op.error.unwrap();
+        assert_eq!(err.code, 400);
+        assert_eq!(err.message, "bad request");
+    }
+
+    #[test]
+    fn operation_json_in_progress() {
+        let json = r#"{"name": "operations/op3", "done": false}"#;
+        let op: Operation = serde_json::from_str(json).unwrap();
+        assert!(!op.done);
+        assert!(op.error.is_none());
     }
 }

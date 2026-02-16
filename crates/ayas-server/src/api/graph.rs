@@ -9,16 +9,15 @@ use futures::stream;
 use serde::Serialize;
 
 use ayas_core::config::RunnableConfig;
-use ayas_core::model::ChatModel;
+use ayas_deep_research::gemini::GeminiInteractionsClient;
 use ayas_graph::compiled::StepInfo;
 use ayas_graph::stream::StreamEvent;
 use ayas_llm::factory::create_chat_model;
-use ayas_llm::provider::Provider;
 
 use crate::error::AppError;
 use crate::extractors::ApiKeys;
 use crate::graph_convert::{
-    GraphBuildContext, GraphModelFactory, convert_to_state_graph, convert_to_state_graph_with_context,
+    GraphBuildContext, GraphModelFactory, GraphResearchFactory, convert_to_state_graph_with_context,
     validate_graph,
 };
 use crate::graph_gen;
@@ -33,6 +32,11 @@ use crate::types::{
 /// Create the default factory that delegates to ayas_llm::factory.
 pub fn default_graph_factory() -> GraphModelFactory {
     Arc::new(|provider, api_key, model_id| create_chat_model(provider, api_key, model_id))
+}
+
+/// Create the default research factory that creates GeminiInteractionsClient instances.
+pub fn default_research_factory() -> GraphResearchFactory {
+    Arc::new(|api_key| Arc::new(GeminiInteractionsClient::new(api_key)))
 }
 
 pub fn routes() -> Router {
@@ -98,7 +102,11 @@ async fn graph_execute(
         None
     };
 
-    let context = GraphBuildContext { factory, api_keys };
+    let context = GraphBuildContext {
+        factory,
+        api_keys,
+        research_factory: Some(default_research_factory()),
+    };
     let compiled = convert_to_state_graph_with_context(
         &req.nodes, &req.edges, &req.channels, Some(context),
     )?;
@@ -178,7 +186,11 @@ async fn graph_invoke_stream(
         None
     };
 
-    let context = GraphBuildContext { factory, api_keys };
+    let context = GraphBuildContext {
+        factory,
+        api_keys,
+        research_factory: Some(default_research_factory()),
+    };
     let compiled = convert_to_state_graph_with_context(
         &req.nodes, &req.edges, &req.channels, Some(context),
     )?;
@@ -241,7 +253,11 @@ async fn graph_stream(
     let modes = parse_stream_modes(req.stream_mode.as_deref().unwrap_or(""))
         .map_err(|e| AppError::BadRequest(e))?;
 
-    let context = GraphBuildContext { factory, api_keys };
+    let context = GraphBuildContext {
+        factory,
+        api_keys,
+        research_factory: Some(default_research_factory()),
+    };
     let compiled = convert_to_state_graph_with_context(
         &req.nodes, &req.edges, &req.channels, Some(context),
     )?;
@@ -341,6 +357,7 @@ mod tests {
     use async_trait::async_trait;
     use ayas_core::error::Result;
     use ayas_core::message::{AIContent, UsageMetadata};
+    use ayas_core::model::ChatModel;
 
     fn app() -> Router {
         Router::new().nest("/api", routes())

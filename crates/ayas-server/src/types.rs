@@ -180,6 +180,72 @@ pub struct ResearchInvokeRequest {
     pub attachments: Vec<ayas_core::message::ContentPart>,
 }
 
+// --- Saved Graphs ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedGraph {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub graph_data: GraphData,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphData {
+    pub nodes: Vec<SavedGraphNode>,
+    pub edges: Vec<GraphEdgeDto>,
+    pub channels: Vec<GraphChannelDto>,
+    pub node_counter: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedGraphNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub node_type: String,
+    pub label: Option<String>,
+    pub config: Option<serde_json::Value>,
+    pub position: NodePosition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveGraphRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub graph_data: GraphData,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGraphRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub graph_data: Option<GraphData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SaveGraphResponse {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphListItem {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,10 +18,17 @@ import '@xyflow/react/dist/style.css';
 import {
   graphValidate,
   graphInvokeStream,
+  saveGraph,
+  listGraphs,
+  getGraph,
+  updateGraph,
+  deleteGraph,
   type GraphNodeDto,
   type GraphEdgeDto,
   type GraphChannelDto,
   type GraphSseEvent,
+  type GraphData,
+  type GraphListItem,
 } from '../lib/api';
 
 // --- Custom Node Components ---
@@ -89,6 +96,21 @@ function TransformNode({ data }: { data: { label: string; active?: boolean } }) 
   );
 }
 
+function DeepResearchNode({ data }: { data: { label: string; active?: boolean } }) {
+  return (
+    <div className={`px-4 py-2 border-2 rounded-lg text-sm min-w-[120px] ${
+      data.active ? 'border-purple-500 bg-purple-50 animate-pulse' : 'border-purple-300 bg-purple-50'
+    }`}>
+      <Handle type="target" position={Position.Top} className="!bg-purple-500" />
+      <div className="flex items-center gap-1.5">
+        <span className="text-base">🔬</span>
+        <span className="font-medium text-foreground">{data.label}</span>
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!bg-purple-500" />
+    </div>
+  );
+}
+
 const nodeTypes: NodeTypes = {
   start: StartNode,
   end: EndNode,
@@ -96,6 +118,7 @@ const nodeTypes: NodeTypes = {
   conditional: ConditionalNode,
   transform: TransformNode,
   passthrough: TransformNode,
+  deep_research: DeepResearchNode,
 };
 
 // --- Helper: get/update config for a node ---
@@ -151,6 +174,19 @@ const DEFAULT_TRANSFORM_CONFIG: NodeConfig = {
   output_channel: 'value',
 };
 
+const DEEP_RESEARCH_AGENT_OPTIONS = [
+  { id: 'deep-research-pro-preview-12-2025', label: 'Deep Research Pro' },
+];
+
+const DEFAULT_DEEP_RESEARCH_CONFIG: NodeConfig = {
+  agent: 'deep-research-pro-preview-12-2025',
+  prompt: '',
+  input_channel: 'value',
+  output_channel: 'value',
+  attachments_channel: '',
+  file_search_store_names: '',
+};
+
 export default function Graph() {
   const [nodes, setNodes, onNodesChange] = useNodesState(INITIAL_NODES);
   const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
@@ -168,6 +204,13 @@ export default function Graph() {
   const [newNodeType, setNewNodeType] = useState('llm');
   const [newNodeLabel, setNewNodeLabel] = useState('');
   const nodeCounter = useRef(1);
+  // Save/Load state
+  const [currentGraphId, setCurrentGraphId] = useState<string | null>(null);
+  const [currentGraphName, setCurrentGraphName] = useState<string | null>(null);
+  const [saveModal, setSaveModal] = useState(false);
+  const [loadModal, setLoadModal] = useState(false);
+  const [savedGraphs, setSavedGraphs] = useState<GraphListItem[]>([]);
+  const [saveName, setSaveName] = useState('');
 
   const onConnect: OnConnect = useCallback(
     (params) => setEdges((eds) => addEdge(params, eds)),
@@ -195,12 +238,23 @@ export default function Graph() {
   const toApiNodes = (): GraphNodeDto[] =>
     nodes
       .filter((n) => n.type !== 'start' && n.type !== 'end')
-      .map((n) => ({
-        id: n.id,
-        type: n.type || 'passthrough',
-        label: (n.data as Record<string, string>).label || n.id,
-        config: (n.data as Record<string, unknown>).config as Record<string, unknown> | undefined,
-      }));
+      .map((n) => {
+        const config = (n.data as Record<string, unknown>).config as Record<string, unknown> | undefined;
+        // Convert file_search_store_names from newline-separated string to array
+        if (config && typeof config.file_search_store_names === 'string') {
+          const names = (config.file_search_store_names as string)
+            .split('\n')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+          config.file_search_store_names = names.length > 0 ? names : undefined;
+        }
+        return {
+          id: n.id,
+          type: n.type || 'passthrough',
+          label: (n.data as Record<string, string>).label || n.id,
+          config,
+        };
+      });
 
   const toApiEdges = (): GraphEdgeDto[] =>
     edges.map((e) => ({
@@ -292,6 +346,7 @@ export default function Graph() {
     const id = `${newNodeType}_${nodeCounter.current++}`;
     const defaultConfig =
       newNodeType === 'llm' ? { ...DEFAULT_LLM_CONFIG } :
+      newNodeType === 'deep_research' ? { ...DEFAULT_DEEP_RESEARCH_CONFIG } :
       newNodeType === 'transform' ? { ...DEFAULT_TRANSFORM_CONFIG } :
       undefined;
     const newNode: Node = {
@@ -303,6 +358,119 @@ export default function Graph() {
     setNodes((nds) => [...nds, newNode]);
     setNewNodeLabel('');
     setAddNodeModal(false);
+  };
+
+  // --- Save/Load helpers ---
+
+  const toGraphData = (): GraphData => ({
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      type: n.type || 'passthrough',
+      label: (n.data as Record<string, string>).label || undefined,
+      config: (n.data as Record<string, unknown>).config as Record<string, unknown> | undefined,
+      position: { x: n.position.x, y: n.position.y },
+    })),
+    edges: edges.map((e) => ({
+      from: e.source,
+      to: e.target,
+      condition: e.label as string | undefined,
+    })),
+    channels: channels.map((c) => ({
+      key: c.key,
+      type: c.type,
+      default: c.default || undefined,
+    })),
+    node_counter: nodeCounter.current,
+  });
+
+  const loadGraphData = (data: GraphData) => {
+    const newNodes: Node[] = data.nodes.map((n) => ({
+      id: n.id,
+      type: n.type,
+      position: { x: n.position.x, y: n.position.y },
+      data: {
+        ...(n.label ? { label: n.label } : {}),
+        ...(n.config ? { config: n.config } : {}),
+      },
+    }));
+    const newEdges: Edge[] = data.edges.map((e, i) => ({
+      id: `e-${e.from}-${e.to}-${i}`,
+      source: e.from,
+      target: e.to,
+      ...(e.condition ? { label: e.condition } : {}),
+    }));
+    const newChannels: ChannelEntry[] = data.channels.map((c) => ({
+      key: c.key,
+      type: c.type,
+      default: c.default != null ? String(c.default) : undefined,
+    }));
+    setNodes(newNodes);
+    setEdges(newEdges);
+    setChannels(newChannels.length > 0 ? newChannels : [{ key: 'value', type: 'LastValue', default: '' }]);
+    nodeCounter.current = data.node_counter || 1;
+  };
+
+  const handleSave = async () => {
+    const name = saveName.trim();
+    if (!name) return;
+    try {
+      const data = toGraphData();
+      if (currentGraphId) {
+        await updateGraph(currentGraphId, data, name);
+        setCurrentGraphName(name);
+        showToast('success', `Saved "${name}"`);
+      } else {
+        const res = await saveGraph(name, data);
+        setCurrentGraphId(res.id);
+        setCurrentGraphName(name);
+        showToast('success', `Saved "${name}"`);
+      }
+      setSaveModal(false);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Save failed');
+    }
+  };
+
+  const handleLoad = async (id: string) => {
+    try {
+      const graph = await getGraph(id);
+      loadGraphData(graph.graph_data);
+      setCurrentGraphId(graph.id);
+      setCurrentGraphName(graph.name);
+      setLoadModal(false);
+      showToast('success', `Loaded "${graph.name}"`);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Load failed');
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteGraph(id);
+      setSavedGraphs((prev) => prev.filter((g) => g.id !== id));
+      if (currentGraphId === id) {
+        setCurrentGraphId(null);
+        setCurrentGraphName(null);
+      }
+      showToast('success', 'Graph deleted');
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Delete failed');
+    }
+  };
+
+  const openLoadModal = async () => {
+    try {
+      const graphs = await listGraphs();
+      setSavedGraphs(graphs);
+    } catch {
+      setSavedGraphs([]);
+    }
+    setLoadModal(true);
+  };
+
+  const openSaveModal = () => {
+    setSaveName(currentGraphName || '');
+    setSaveModal(true);
   };
 
   // Render config editor fields for the selected node
@@ -383,6 +551,154 @@ export default function Graph() {
                 className="w-full px-2 py-1.5 border border-border rounded text-xs"
               />
             </div>
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Response Format</label>
+            <select
+              value={(() => {
+                const rf = config.response_format as Record<string, unknown> | undefined;
+                if (!rf) return 'text';
+                return (rf.type as string) || 'text';
+              })()}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === 'text') {
+                  updateNodeConfig(id, 'response_format', undefined);
+                } else if (val === 'json_object') {
+                  updateNodeConfig(id, 'response_format', { type: 'json_object' });
+                } else if (val === 'json_schema') {
+                  updateNodeConfig(id, 'response_format', {
+                    type: 'json_schema',
+                    name: 'output',
+                    schema: {},
+                    strict: true,
+                  });
+                }
+              }}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+            >
+              <option value="text">Text (default)</option>
+              <option value="json_object">JSON Object</option>
+              <option value="json_schema">JSON Schema</option>
+            </select>
+          </div>
+          {(() => {
+            const rf = config.response_format as Record<string, unknown> | undefined;
+            if (rf?.type !== 'json_schema') return null;
+            return (
+              <div className="space-y-2">
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-0.5">Schema Name</label>
+                  <input
+                    type="text"
+                    value={(rf.name as string) || 'output'}
+                    onChange={(e) => updateNodeConfig(id, 'response_format', { ...rf, name: e.target.value })}
+                    className="w-full px-2 py-1.5 border border-border rounded text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-0.5">JSON Schema</label>
+                  <textarea
+                    value={typeof rf.schema === 'object' ? JSON.stringify(rf.schema, null, 2) : '{}'}
+                    onChange={(e) => {
+                      try {
+                        const schema = JSON.parse(e.target.value);
+                        updateNodeConfig(id, 'response_format', { ...rf, schema });
+                      } catch {
+                        // Don't update on invalid JSON
+                      }
+                    }}
+                    rows={4}
+                    placeholder='{"type": "object", "properties": {...}}'
+                    className="w-full px-2 py-1.5 border border-border rounded text-xs font-mono resize-none"
+                  />
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      );
+    }
+
+    if (selectedNode.type === 'deep_research') {
+      return (
+        <div className="space-y-3 mt-3">
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Deep Research Config</h4>
+          <div className="px-2 py-1.5 bg-purple-50 border border-purple-200 rounded text-xs text-purple-700">
+            Gemini API Key required. Execution may take several minutes.
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Agent</label>
+            <select
+              value={(config.agent as string) || 'deep-research-pro-preview-12-2025'}
+              onChange={(e) => updateNodeConfig(id, 'agent', e.target.value)}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+            >
+              {DEEP_RESEARCH_AGENT_OPTIONS.map((a) => (
+                <option key={a.id} value={a.id}>{a.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Prompt Template</label>
+            <textarea
+              value={(config.prompt as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'prompt', e.target.value)}
+              rows={3}
+              placeholder="{INPUT} to reference input channel value"
+              className="w-full px-2 py-1.5 border border-border rounded text-xs resize-none"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs text-muted-foreground mb-0.5">Input Ch.</label>
+              <input
+                type="text"
+                value={(config.input_channel as string) || 'value'}
+                onChange={(e) => updateNodeConfig(id, 'input_channel', e.target.value)}
+                className="w-full px-2 py-1.5 border border-border rounded text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-0.5">Output Ch.</label>
+              <input
+                type="text"
+                value={(config.output_channel as string) || 'value'}
+                onChange={(e) => updateNodeConfig(id, 'output_channel', e.target.value)}
+                className="w-full px-2 py-1.5 border border-border rounded text-xs"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Attachments (text)</label>
+            <textarea
+              value={(config.attachments_text as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'attachments_text', e.target.value)}
+              rows={4}
+              placeholder="Paste reference text here (e.g. specs, docs)..."
+              className="w-full px-2 py-1.5 border border-border rounded text-xs font-mono resize-y"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Attachments Ch.</label>
+            <input
+              type="text"
+              value={(config.attachments_channel as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'attachments_channel', e.target.value)}
+              placeholder="(optional, read from state)"
+              className="w-full px-2 py-1.5 border border-border rounded text-xs"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">File Search Stores</label>
+            <textarea
+              value={(config.file_search_store_names as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'file_search_store_names', e.target.value)}
+              rows={2}
+              placeholder="fileSearchStores/xxx (1 per line)"
+              className="w-full px-2 py-1.5 border border-border rounded text-xs font-mono resize-y"
+            />
+            <p className="text-[10px] text-muted-foreground mt-0.5">Pre-created File Search Store names, one per line</p>
           </div>
         </div>
       );
@@ -527,6 +843,13 @@ export default function Graph() {
         </div>
       </aside>
 
+      {/* Current graph name */}
+      {currentGraphName && (
+        <div className="absolute top-4 left-4 px-3 py-1.5 bg-card/90 border border-border rounded-lg text-sm text-foreground shadow-sm backdrop-blur-sm">
+          {currentGraphName}
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="absolute bottom-4 left-4 flex gap-2">
         <button
@@ -539,13 +862,25 @@ export default function Graph() {
           onClick={handleValidate}
           className="px-4 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface"
         >
-          Validate ✓
+          Validate
         </button>
         <button
           onClick={() => setRunModal(true)}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
         >
-          ▶ Run
+          Run
+        </button>
+        <button
+          onClick={openSaveModal}
+          className="px-4 py-2 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700"
+        >
+          Save
+        </button>
+        <button
+          onClick={openLoadModal}
+          className="px-4 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface"
+        >
+          Load
         </button>
       </div>
 
@@ -572,6 +907,7 @@ export default function Graph() {
                   className="w-full px-3 py-2 border border-border rounded-md text-sm bg-card"
                 >
                   <option value="llm">💬 LLM Call</option>
+                  <option value="deep_research">🔬 Deep Research</option>
                   <option value="conditional">◇ Conditional</option>
                   <option value="transform">⚙ Transform</option>
                 </select>
@@ -640,6 +976,105 @@ export default function Graph() {
             </div>
             <div className="flex justify-end mt-4">
               <button onClick={() => setRunModal(false)} disabled={running} className="px-4 py-2 text-sm text-card-foreground">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Modal */}
+      {saveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setSaveModal(false)}>
+          <div className="bg-card rounded-lg shadow-xl w-full max-w-sm p-6" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-foreground mb-4">
+              {currentGraphId ? 'Save Graph' : 'Save New Graph'}
+            </h2>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-card-foreground mb-1">Name</label>
+                <input
+                  type="text"
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  placeholder="My Graph"
+                  className="w-full px-3 py-2 border border-border rounded-md text-sm"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); }}
+                  autoFocus
+                />
+              </div>
+              {currentGraphId && (
+                <p className="text-xs text-muted-foreground">
+                  Updating existing graph. To save as new, click &quot;Save as New&quot;.
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setSaveModal(false)} className="px-4 py-2 text-sm text-card-foreground">Cancel</button>
+              <button
+                onClick={handleSave}
+                disabled={!saveName.trim()}
+                className="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {currentGraphId ? 'Update' : 'Save'}
+              </button>
+              {currentGraphId && (
+                <button
+                  onClick={() => {
+                    setCurrentGraphId(null);
+                    setCurrentGraphName(null);
+                    handleSave();
+                  }}
+                  disabled={!saveName.trim()}
+                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                >
+                  Save as New
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Load Modal */}
+      {loadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setLoadModal(false)}>
+          <div className="bg-card rounded-lg shadow-xl w-full max-w-md p-6 max-h-[70vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-foreground mb-4">Load Graph</h2>
+            {savedGraphs.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">No saved graphs yet</p>
+            ) : (
+              <div className="space-y-2">
+                {savedGraphs.map((g) => (
+                  <div
+                    key={g.id}
+                    className="flex items-center justify-between px-3 py-2 border border-border rounded-lg hover:bg-surface cursor-pointer group"
+                    onClick={() => handleLoad(g.id)}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-foreground truncate">{g.name}</p>
+                      {g.description && (
+                        <p className="text-xs text-muted-foreground truncate">{g.description}</p>
+                      )}
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {new Date(g.updated_at).toLocaleDateString()} {new Date(g.updated_at).toLocaleTimeString()}
+                      </p>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(g.id);
+                      }}
+                      className="ml-2 px-2 py-1 text-xs text-red-500 hover:text-red-700 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end mt-4">
+              <button onClick={() => setLoadModal(false)} className="px-4 py-2 text-sm text-card-foreground">
                 Close
               </button>
             </div>

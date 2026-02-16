@@ -81,6 +81,45 @@ export interface GraphSseEvent {
   message?: string;
 }
 
+// --- Saved Graphs ---
+
+export interface NodePosition {
+  x: number;
+  y: number;
+}
+
+export interface SavedGraphNode {
+  id: string;
+  type: string;
+  label?: string;
+  config?: Record<string, unknown>;
+  position: NodePosition;
+}
+
+export interface GraphData {
+  nodes: SavedGraphNode[];
+  edges: GraphEdgeDto[];
+  channels: GraphChannelDto[];
+  node_counter: number;
+}
+
+export interface SavedGraph {
+  id: string;
+  name: string;
+  description?: string;
+  graph_data: GraphData;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GraphListItem {
+  id: string;
+  name: string;
+  description?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Research ---
 
 export interface ResearchSseEvent {
@@ -299,6 +338,53 @@ export async function graphGenerate(
     method: 'POST',
     headers,
     body: JSON.stringify({ prompt, provider, model }),
+  });
+  return handleResponse(res);
+}
+
+// --- Saved Graphs API ---
+
+export async function saveGraph(
+  name: string,
+  graphData: GraphData,
+  description?: string,
+): Promise<{ id: string; name: string; created_at: string }> {
+  const res = await fetch('/api/graphs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description, graph_data: graphData }),
+  });
+  return handleResponse(res);
+}
+
+export async function listGraphs(): Promise<GraphListItem[]> {
+  const res = await fetch('/api/graphs');
+  return handleResponse<GraphListItem[]>(res);
+}
+
+export async function getGraph(id: string): Promise<SavedGraph> {
+  const res = await fetch(`/api/graphs/${encodeURIComponent(id)}`);
+  return handleResponse<SavedGraph>(res);
+}
+
+export async function updateGraph(
+  id: string,
+  graphData: GraphData,
+  name?: string,
+): Promise<SavedGraph> {
+  const body: Record<string, unknown> = { graph_data: graphData };
+  if (name !== undefined) body.name = name;
+  const res = await fetch(`/api/graphs/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return handleResponse<SavedGraph>(res);
+}
+
+export async function deleteGraph(id: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`/api/graphs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   });
   return handleResponse(res);
 }

@@ -700,6 +700,7 @@ dependencies = [
  "ayas-smith",
  "chrono",
  "dirs",
+ "duckdb",
  "futures",
  "http-body-util",
  "meval",

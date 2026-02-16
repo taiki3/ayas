@@ -3,6 +3,7 @@ pub mod chat;
 pub mod datasets;
 pub mod feedback;
 pub mod graph;
+pub mod graphs;
 pub mod hitl;
 pub mod pipeline;
 pub mod projects;
@@ -35,6 +36,7 @@ pub fn api_routes(state: AppState) -> Router {
         .merge(feedback::routes())
         .merge(projects::routes())
         .merge(datasets::routes())
+        .merge(graphs::routes())
         .with_state(state);
 
     // Stateless routes (already Router<()>)

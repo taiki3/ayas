@@ -84,6 +84,9 @@ pub struct GraphEdgeDto {
     pub to: String,
     #[serde(default)]
     pub condition: Option<String>,
+    /// When true, edges sharing the same `from` node are executed in parallel (fan-out).
+    #[serde(default)]
+    pub fan_out: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

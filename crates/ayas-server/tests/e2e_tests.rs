@@ -7,8 +7,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 /// Create the full app router for E2E tests.
-fn app() -> axum::Router {
-    ayas_server::app_router()
+async fn app() -> axum::Router {
+    ayas_server::app_router().await
 }
 
 fn parse_sse_events(body: &[u8]) -> Vec<serde_json::Value> {
@@ -24,7 +24,7 @@ fn parse_sse_events(body: &[u8]) -> Vec<serde_json::Value> {
 #[ignore]
 async fn e2e_chat_gemini() {
     let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "provider": "gemini",
         "model": "gemini-2.0-flash",
@@ -57,7 +57,7 @@ async fn e2e_chat_gemini() {
 #[ignore]
 async fn e2e_agent_gemini_calculator() {
     let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "provider": "gemini",
         "model": "gemini-2.0-flash",
@@ -101,7 +101,7 @@ async fn e2e_agent_gemini_calculator() {
 #[ignore]
 async fn e2e_agent_claude_calculator() {
     let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set");
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "provider": "claude",
         "model": "claude-sonnet-4-5-20250929",
@@ -136,7 +136,7 @@ async fn e2e_agent_claude_calculator() {
 #[ignore]
 async fn e2e_agent_openai_calculator() {
     let key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "provider": "openai",
         "model": "gpt-4o-mini",

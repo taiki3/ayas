@@ -191,6 +191,7 @@ export default function Graph() {
   const [nodes, setNodes, onNodesChange] = useNodesState(INITIAL_NODES);
   const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [channels, setChannels] = useState<ChannelEntry[]>([
     { key: 'value', type: 'LastValue', default: '' },
   ]);
@@ -218,6 +219,7 @@ export default function Graph() {
   );
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+  const selectedEdge = edges.find((e) => e.id === selectedEdgeId);
 
   const showToast = (type: 'success' | 'error', message: string) => {
     setToast({ type, message });
@@ -260,7 +262,8 @@ export default function Graph() {
     edges.map((e) => ({
       from: e.source,
       to: e.target,
-      condition: e.label as string | undefined,
+      condition: (e.data as Record<string, unknown>)?.condition as string | undefined,
+      fan_out: !!(e.data as Record<string, unknown>)?.fan_out,
     }));
 
   const toApiChannels = (): GraphChannelDto[] =>
@@ -373,7 +376,8 @@ export default function Graph() {
     edges: edges.map((e) => ({
       from: e.source,
       to: e.target,
-      condition: e.label as string | undefined,
+      condition: (e.data as Record<string, unknown>)?.condition as string | undefined,
+      fan_out: !!(e.data as Record<string, unknown>)?.fan_out,
     })),
     channels: channels.map((c) => ({
       key: c.key,
@@ -397,7 +401,13 @@ export default function Graph() {
       id: `e-${e.from}-${e.to}-${i}`,
       source: e.from,
       target: e.to,
-      ...(e.condition ? { label: e.condition } : {}),
+      ...(e.fan_out ? {
+        style: { strokeWidth: 2, strokeDasharray: '6 3', stroke: '#f97316' },
+        label: 'parallel',
+        labelStyle: { fill: '#f97316', fontSize: 10, fontWeight: 600 },
+      } : {}),
+      ...(e.condition && !e.fan_out ? { label: e.condition } : {}),
+      data: { fan_out: !!e.fan_out, condition: e.condition || undefined },
     }));
     const newChannels: ChannelEntry[] = data.channels.map((c) => ({
       key: c.key,
@@ -744,8 +754,9 @@ export default function Graph() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
-          onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-          onPaneClick={() => setSelectedNodeId(null)}
+          onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
+          onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
+          onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
           nodeTypes={nodeTypes}
           fitView
           defaultEdgeOptions={{ style: { strokeWidth: 2 } }}
@@ -757,7 +768,77 @@ export default function Graph() {
 
       {/* Property Panel */}
       <aside className="w-[280px] border-l border-border bg-card p-4 overflow-y-auto shrink-0">
-        {selectedNode && selectedNode.type !== 'start' && selectedNode.type !== 'end' ? (
+        {selectedEdge ? (
+          <div className="space-y-4">
+            <h3 className="text-sm font-semibold text-foreground">Edge: {selectedEdge.source} &rarr; {selectedEdge.target}</h3>
+            <div>
+              <label className="flex items-center gap-2 text-xs text-card-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!(selectedEdge.data as Record<string, unknown>)?.fan_out}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setEdges((eds) =>
+                      eds.map((ed) => {
+                        if (ed.id !== selectedEdge.id) return ed;
+                        return {
+                          ...ed,
+                          data: { ...(ed.data as Record<string, unknown>), fan_out: checked },
+                          style: checked
+                            ? { strokeWidth: 2, strokeDasharray: '6 3', stroke: '#f97316' }
+                            : { strokeWidth: 2 },
+                          label: checked ? 'parallel' : ((ed.data as Record<string, unknown>)?.condition as string || undefined),
+                          labelStyle: checked ? { fill: '#f97316', fontSize: 10, fontWeight: 600 } : undefined,
+                        };
+                      }),
+                    );
+                  }}
+                  className="accent-orange-500"
+                />
+                <span className="font-medium">Fan-out (parallel execution)</span>
+              </label>
+              <p className="text-[10px] text-muted-foreground mt-1 ml-5">
+                Edges with fan-out from the same source node run their targets in parallel.
+              </p>
+            </div>
+            {!(selectedEdge.data as Record<string, unknown>)?.fan_out && (
+              <div>
+                <label className="block text-xs text-muted-foreground mb-0.5">Condition (state key)</label>
+                <input
+                  type="text"
+                  value={((selectedEdge.data as Record<string, unknown>)?.condition as string) || ''}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setEdges((eds) =>
+                      eds.map((ed) => {
+                        if (ed.id !== selectedEdge.id) return ed;
+                        return {
+                          ...ed,
+                          data: { ...(ed.data as Record<string, unknown>), condition: val || undefined },
+                          label: val || undefined,
+                        };
+                      }),
+                    );
+                  }}
+                  placeholder="e.g. flag"
+                  className="w-full px-2 py-1.5 border border-border rounded text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Route to this target when state[key] is truthy.
+                </p>
+              </div>
+            )}
+            <button
+              onClick={() => {
+                setEdges((eds) => eds.filter((ed) => ed.id !== selectedEdge.id));
+                setSelectedEdgeId(null);
+              }}
+              className="text-xs text-red-500 hover:text-red-700"
+            >
+              Delete edge
+            </button>
+          </div>
+        ) : selectedNode && selectedNode.type !== 'start' && selectedNode.type !== 'end' ? (
           <div className="space-y-4">
             <h3 className="text-sm font-semibold text-foreground">Node: {selectedNode.id}</h3>
             <div>
@@ -790,7 +871,7 @@ export default function Graph() {
               {selectedNode ? `${selectedNode.type?.toUpperCase()} node` : 'No node selected'}
             </h3>
             {!selectedNode && (
-              <p className="text-xs text-muted-foreground">Click a node to edit its properties</p>
+              <p className="text-xs text-muted-foreground">Click a node or edge to edit properties</p>
             )}
           </div>
         )}

@@ -14,7 +14,7 @@ use ayas_deep_research::types::ToolConfig;
 use ayas_graph::channel::ChannelSpec;
 use ayas_graph::compiled::CompiledStateGraph;
 use ayas_graph::constants::END;
-use ayas_graph::edge::ConditionalEdge;
+use ayas_graph::edge::{ConditionalEdge, ConditionalFanOutEdge};
 use ayas_graph::node::NodeFn;
 use ayas_graph::state_graph::StateGraph;
 use ayas_llm::provider::Provider;
@@ -194,9 +194,22 @@ pub fn convert_to_state_graph_with_context(
         graph.set_finish_point(fp);
     }
 
+    // Collect fan-out edges grouped by source node
+    let mut fan_out_groups: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
     // Add edges (skip start→X and X→end, handled by entry/finish points)
     for edge in edges {
         if edge.from == "start" || edge.to == "end" {
+            continue;
+        }
+
+        // Fan-out edges: group by source and add as ConditionalFanOutEdge later
+        if edge.fan_out {
+            fan_out_groups
+                .entry(edge.from.clone())
+                .or_default()
+                .push(edge.to.clone());
             continue;
         }
 
@@ -221,6 +234,21 @@ pub fn convert_to_state_graph_with_context(
         } else {
             graph.add_edge(&edge.from, &edge.to);
         }
+    }
+
+    // Add fan-out edges: each group becomes a ConditionalFanOutEdge
+    for (from, targets) in fan_out_groups {
+        let mut target_map = std::collections::HashMap::new();
+        for t in &targets {
+            target_map.insert(t.clone(), t.clone());
+        }
+        let targets_clone = targets.clone();
+        let fan_out = ConditionalFanOutEdge::new(
+            &from,
+            move |_state: &Value| targets_clone.clone(),
+            target_map,
+        );
+        graph.add_conditional_fan_out_edges(fan_out);
     }
 
     graph.compile()
@@ -583,6 +611,16 @@ mod tests {
             from: from.into(),
             to: to.into(),
             condition: None,
+            fan_out: false,
+        }
+    }
+
+    fn fan_out_edge(from: &str, to: &str) -> GraphEdgeDto {
+        GraphEdgeDto {
+            from: from.into(),
+            to: to.into(),
+            condition: None,
+            fan_out: true,
         }
     }
 
@@ -641,6 +679,7 @@ mod tests {
                 from: "check".into(),
                 to: "branch_a".into(),
                 condition: Some("flag".into()),
+                fan_out: false,
             },
             edge("branch_a", "end"),
         ];
@@ -688,6 +727,7 @@ mod tests {
                 from: "router".into(),
                 to: "handler_a".into(),
                 condition: Some("route_a".into()),
+                fan_out: false,
             },
             edge("handler_a", "end"),
             edge("handler_b", "end"),
@@ -1115,5 +1155,94 @@ mod tests {
         let input = json!({"value": "topic", "result": ""});
         let output = compiled.invoke(input, &config).await.unwrap();
         assert_eq!(output["result"], "Research with direct text");
+    }
+
+    // --- Fan-out edge tests ---
+
+    #[test]
+    fn convert_fan_out_edges() {
+        // splitter → [branch_a, branch_b] (parallel) → aggregator → END
+        let nodes = vec![
+            node("splitter", "transform"),
+            node("branch_a", "passthrough"),
+            node("branch_b", "passthrough"),
+            node("aggregator", "passthrough"),
+        ];
+        let edges = vec![
+            edge("start", "splitter"),
+            fan_out_edge("splitter", "branch_a"),
+            fan_out_edge("splitter", "branch_b"),
+            edge("branch_a", "aggregator"),
+            edge("branch_b", "aggregator"),
+            edge("aggregator", "end"),
+        ];
+        let channels = vec![channel("log", "Append")];
+        let result = convert_to_state_graph(&nodes, &edges, &channels);
+        assert!(result.is_ok(), "Fan-out graph should compile: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_fan_out_parallel_execution() {
+        // splitter → [a, b] (parallel fan-out) → aggregator → END
+        // Uses Append channel to verify both branches ran
+        let mut splitter = node("splitter", "transform");
+        splitter.config = Some(json!({
+            "expression": "\"split\"",
+            "output_channel": "log"
+        }));
+        let nodes = vec![
+            splitter,
+            node("branch_a", "transform"),
+            node("branch_b", "transform"),
+            node("aggregator", "passthrough"),
+        ];
+        // Configure branch nodes
+        let nodes: Vec<GraphNodeDto> = nodes.into_iter().map(|mut n| {
+            if n.id == "branch_a" {
+                n.config = Some(json!({ "expression": "\"ran_a\"", "output_channel": "log" }));
+            }
+            if n.id == "branch_b" {
+                n.config = Some(json!({ "expression": "\"ran_b\"", "output_channel": "log" }));
+            }
+            n
+        }).collect();
+
+        let edges = vec![
+            edge("start", "splitter"),
+            fan_out_edge("splitter", "branch_a"),
+            fan_out_edge("splitter", "branch_b"),
+            edge("branch_a", "aggregator"),
+            edge("branch_b", "aggregator"),
+            edge("aggregator", "end"),
+        ];
+        let channels = vec![channel("log", "Append")];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+        let config = ayas_core::config::RunnableConfig::default();
+        let result = compiled.invoke(json!({}), &config).await.unwrap();
+
+        let log = result["log"].as_array().unwrap();
+        assert!(log.contains(&json!("split")), "splitter should have run");
+        assert!(log.contains(&json!("ran_a")), "branch_a should have run");
+        assert!(log.contains(&json!("ran_b")), "branch_b should have run");
+    }
+
+    #[test]
+    fn validate_fan_out_graph() {
+        let nodes = vec![
+            node("splitter", "transform"),
+            node("a", "passthrough"),
+            node("b", "passthrough"),
+        ];
+        let edges = vec![
+            edge("start", "splitter"),
+            fan_out_edge("splitter", "a"),
+            fan_out_edge("splitter", "b"),
+            edge("a", "end"),
+            edge("b", "end"),
+        ];
+        let channels = vec![channel("value", "LastValue")];
+        let errors = validate_graph(&nodes, &edges, &channels);
+        assert!(errors.is_empty(), "Validation should pass: {:?}", errors);
     }
 }

@@ -322,11 +322,13 @@ async fn graph_generate(
                     from: "start".into(),
                     to: "transform_1".into(),
                     condition: None,
+                    fan_out: false,
                 },
                 GraphEdgeDto {
                     from: "transform_1".into(),
                     to: "end".into(),
                     condition: None,
+                    fan_out: false,
                 },
             ];
             let channels = vec![GraphChannelDto {

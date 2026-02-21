@@ -58,6 +58,8 @@ export interface GraphEdgeDto {
   from: string;
   to: string;
   condition?: string;
+  /** When true, edges sharing the same source node are executed in parallel (fan-out). */
+  fan_out?: boolean;
 }
 
 export interface GraphChannelDto {

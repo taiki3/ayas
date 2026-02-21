@@ -8,8 +8,8 @@ use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-fn app() -> axum::Router {
-    ayas_server::app_router()
+async fn app() -> axum::Router {
+    ayas_server::app_router().await
 }
 
 fn parse_sse_events(body: &[u8]) -> Vec<serde_json::Value> {
@@ -27,7 +27,7 @@ fn parse_sse_events(body: &[u8]) -> Vec<serde_json::Value> {
 
 #[tokio::test]
 async fn graph_execute_passthrough_sse() {
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "nodes": [{"id": "pass1", "type": "passthrough"}],
         "edges": [
@@ -84,7 +84,7 @@ async fn graph_execute_passthrough_sse() {
 
 #[tokio::test]
 async fn graph_invoke_stream_multi_node() {
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "nodes": [
             {"id": "a", "type": "passthrough"},
@@ -156,7 +156,7 @@ async fn graph_invoke_stream_multi_node() {
 
 #[tokio::test]
 async fn graph_validate_valid_graph() {
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "nodes": [
             {"id": "n1", "type": "passthrough"},
@@ -191,7 +191,7 @@ async fn graph_validate_valid_graph() {
 
 #[tokio::test]
 async fn graph_validate_invalid_graph() {
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "nodes": [{"id": "orphan", "type": "passthrough"}],
         "edges": [{"from": "orphan", "to": "end"}],
@@ -232,7 +232,7 @@ async fn graph_execute_with_tracing_header() {
         std::env::set_var("AYAS_SMITH_PROJECT", "e2e-trace-test");
     }
 
-    let app = app();
+    let app = app().await;
     let body = serde_json::json!({
         "nodes": [{"id": "traced", "type": "passthrough"}],
         "edges": [

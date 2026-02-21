@@ -49,7 +49,9 @@ enum HitlSseEvent {
 }
 
 pub fn routes() -> Router {
-    let state = AppState::new();
+    let state = AppState::with_smith_dir(
+        ayas_smith::client::SmithConfig::default().base_dir,
+    );
     let router: Router<AppState> = Router::new()
         .route("/graph/execute-resumable", post(execute_resumable))
         .route("/graph/resume", post(resume))
@@ -367,7 +369,8 @@ mod tests {
     #[tokio::test]
     async fn full_interrupt_resume_cycle() {
         // Use shared state so both requests share the same session/checkpoint stores
-        let state = AppState::new();
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::with_smith_dir(dir.path().to_path_buf());
         let app = Router::new()
             .route("/api/graph/execute-resumable", post(execute_resumable))
             .route("/api/graph/resume", post(resume))
@@ -492,7 +495,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_session_success() {
-        let state = AppState::new();
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::with_smith_dir(dir.path().to_path_buf());
         let session = InterruptSession {
             session_id: "cancel-me".into(),
             thread_id: "t1".into(),

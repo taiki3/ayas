@@ -18,8 +18,8 @@ use tower_http::cors::{CorsLayer, Any};
 use crate::state::AppState;
 use crate::tracing_mw::TracingLayer;
 
-pub fn app_router() -> Router {
-    let state = AppState::new();
+pub async fn app_router() -> Router {
+    let state = AppState::new().await;
     app_router_with_state(state)
 }
 

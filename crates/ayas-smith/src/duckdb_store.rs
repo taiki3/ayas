@@ -142,6 +142,19 @@ fn save_examples_sync(
 
 #[async_trait]
 impl SmithStore for DuckDbStore {
+    async fn init(&self) -> Result<(), SmithError> {
+        // DuckDbStore uses file-based JSON storage for metadata.
+        // Ensure directories exist.
+        let base = self.base_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(base.join("_meta"))?;
+            std::fs::create_dir_all(base.join("_feedback"))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| SmithError::Query(format!("spawn_blocking failed: {e}")))?
+    }
+
     async fn put_runs(&self, runs: &[Run]) -> Result<(), SmithError> {
         if runs.is_empty() {
             return Ok(());

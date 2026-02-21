@@ -27,7 +27,7 @@ futures = { workspace = true }
 tokio-stream = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-ayas-smith = { workspace = true }
+ayas-smith = { workspace = true, features = ["clickhouse"] }
 uuid = { workspace = true }
 dirs = { workspace = true }
 rhai = { workspace = true }

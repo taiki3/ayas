@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
-
 use axum::extract::State;
 use axum::{Json, Router, routing::post};
+
+use ayas_smith::types::FeedbackFilter;
 
 use crate::error::AppError;
 use crate::run_types::{
@@ -15,40 +15,11 @@ pub fn routes() -> Router<AppState> {
         .route("/feedback/query", post(query_feedback))
 }
 
-fn feedback_dir(base: &Path) -> PathBuf {
-    base.join("_feedback")
-}
-
-fn feedback_file(base: &Path) -> PathBuf {
-    feedback_dir(base).join("feedback.json")
-}
-
-fn load_feedback(base: &Path) -> Result<Vec<Feedback>, AppError> {
-    let path = feedback_file(base);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let data = std::fs::read_to_string(&path).map_err(|e| AppError::Internal(e.to_string()))?;
-    let items: Vec<Feedback> =
-        serde_json::from_str(&data).map_err(|e| AppError::Internal(e.to_string()))?;
-    Ok(items)
-}
-
-fn save_feedback(base: &Path, items: &[Feedback]) -> Result<(), AppError> {
-    let dir = feedback_dir(base);
-    std::fs::create_dir_all(&dir).map_err(|e| AppError::Internal(e.to_string()))?;
-    let data =
-        serde_json::to_string_pretty(items).map_err(|e| AppError::Internal(e.to_string()))?;
-    std::fs::write(feedback_file(base), data).map_err(|e| AppError::Internal(e.to_string()))?;
-    Ok(())
-}
-
 async fn submit_feedback(
     State(state): State<AppState>,
     Json(req): Json<FeedbackRequest>,
 ) -> Result<Json<FeedbackResponse>, AppError> {
-    let base = &state.smith_base_dir;
-    let feedback = Feedback {
+    let feedback = ayas_smith::types::Feedback {
         id: uuid::Uuid::new_v4(),
         run_id: req.run_id,
         key: req.key.clone(),
@@ -57,9 +28,11 @@ async fn submit_feedback(
         created_at: chrono::Utc::now(),
     };
 
-    let mut items = load_feedback(base)?;
-    items.push(feedback.clone());
-    save_feedback(base, &items)?;
+    state
+        .smith_store
+        .put_feedback(&feedback)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(FeedbackResponse {
         id: feedback.id,
@@ -73,24 +46,29 @@ async fn query_feedback(
     State(state): State<AppState>,
     Json(req): Json<FeedbackQueryRequest>,
 ) -> Result<Json<Vec<Feedback>>, AppError> {
-    let items = load_feedback(&state.smith_base_dir)?;
-    let filtered: Vec<Feedback> = items
+    let filter = FeedbackFilter {
+        run_id: req.run_id,
+        key: req.key,
+    };
+    let items = state
+        .smith_store
+        .list_feedback(&filter)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Convert smith Feedback to run_types Feedback
+    let feedbacks: Vec<Feedback> = items
         .into_iter()
-        .filter(|f| {
-            if let Some(ref run_id) = req.run_id {
-                if f.run_id != *run_id {
-                    return false;
-                }
-            }
-            if let Some(ref key) = req.key {
-                if f.key != *key {
-                    return false;
-                }
-            }
-            true
+        .map(|f| Feedback {
+            id: f.id,
+            run_id: f.run_id,
+            key: f.key,
+            score: f.score,
+            comment: f.comment,
+            created_at: f.created_at,
         })
         .collect();
-    Ok(Json(filtered))
+    Ok(Json(feedbacks))
 }
 
 #[cfg(test)]
@@ -135,9 +113,6 @@ mod tests {
         assert_eq!(result.run_id, run_id);
         assert_eq!(result.key, "correctness");
         assert!((result.score - 0.9).abs() < f64::EPSILON);
-
-        // Verify file was written
-        assert!(dir.path().join("_feedback").join("feedback.json").exists());
     }
 
     #[tokio::test]

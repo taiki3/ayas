@@ -2,10 +2,6 @@ use axum::extract::{Path, Query, State};
 use axum::{Json, Router, routing::{get, post}};
 use uuid::Uuid;
 
-use ayas_smith::client::flush_runs;
-use ayas_smith::duckdb_store::DuckDbStore;
-use ayas_smith::query::SmithQuery;
-use ayas_smith::store::SmithStore;
 use ayas_smith::types::RunFilter;
 
 use crate::error::AppError;
@@ -35,22 +31,12 @@ async fn batch_ingest(
         return Ok(Json(BatchIngestResponse { ingested: 0 }));
     }
 
-    let base_dir = state.smith_base_dir.clone();
     let runs: Vec<ayas_smith::types::Run> = req.runs.into_iter().map(|dto| dto.into()).collect();
-
-    // Group runs by project and flush synchronously
-    let mut by_project: std::collections::HashMap<String, Vec<ayas_smith::types::Run>> =
-        std::collections::HashMap::new();
-    for run in runs {
-        by_project
-            .entry(run.project.clone())
-            .or_default()
-            .push(run);
-    }
-
-    for (project, runs) in &by_project {
-        flush_runs(runs, &base_dir, project).map_err(|e| AppError::Internal(e.to_string()))?;
-    }
+    state
+        .smith_store
+        .put_runs(&runs)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(BatchIngestResponse { ingested: count }))
 }
@@ -60,7 +46,6 @@ async fn batch_run(
     State(state): State<AppState>,
     Json(req): Json<BatchRunRequest>,
 ) -> Result<Json<BatchRunResponse>, AppError> {
-    let base_dir = state.smith_base_dir.clone();
     let posted = req.post.len();
     let patched = req.patch.len();
 
@@ -68,32 +53,21 @@ async fn batch_run(
     if !req.post.is_empty() {
         let runs: Vec<ayas_smith::types::Run> =
             req.post.into_iter().map(|dto| dto.into()).collect();
-
-        let mut by_project: std::collections::HashMap<String, Vec<ayas_smith::types::Run>> =
-            std::collections::HashMap::new();
-        for run in runs {
-            by_project
-                .entry(run.project.clone())
-                .or_default()
-                .push(run);
-        }
-
-        for (project, runs) in &by_project {
-            flush_runs(runs, &base_dir, project)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-        }
+        state
+            .smith_store
+            .put_runs(&runs)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
     // Handle PATCHes
-    if !req.patch.is_empty() {
-        let store = DuckDbStore::new(&base_dir);
-        for patch_req in &req.patch {
-            let patch = ayas_smith::types::RunPatch::from(patch_req);
-            store
-                .patch_run(patch_req.run_id, &patch_req.project, &patch)
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-        }
+    for patch_req in &req.patch {
+        let patch = ayas_smith::types::RunPatch::from(patch_req);
+        state
+            .smith_store
+            .patch_run(patch_req.run_id, &patch_req.project, &patch)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
     Ok(Json(BatchRunResponse { posted, patched }))
@@ -103,11 +77,11 @@ async fn query_runs(
     State(state): State<AppState>,
     Json(req): Json<RunFilterRequest>,
 ) -> Result<Json<Vec<RunSummary>>, AppError> {
-    let base_dir = state.smith_base_dir.clone();
-    let query = SmithQuery::new(&base_dir).map_err(|e| AppError::Internal(e.to_string()))?;
     let filter: RunFilter = req.into();
-    let runs = query
+    let runs = state
+        .smith_store
         .list_runs(&filter)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let summaries: Vec<RunSummary> = runs.iter().map(RunSummary::from).collect();
     Ok(Json(summaries))
@@ -118,10 +92,10 @@ async fn get_run(
     Path(id): Path<Uuid>,
     Query(q): Query<ProjectQuery>,
 ) -> Result<Json<RunDto>, AppError> {
-    let base_dir = state.smith_base_dir.clone();
-    let query = SmithQuery::new(&base_dir).map_err(|e| AppError::Internal(e.to_string()))?;
-    let run = query
+    let run = state
+        .smith_store
         .get_run(id, &q.project)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     match run {
         Some(r) => Ok(Json(RunDto::from(&r))),
@@ -134,10 +108,10 @@ async fn get_trace(
     Path(trace_id): Path<Uuid>,
     Query(q): Query<ProjectQuery>,
 ) -> Result<Json<Vec<RunDto>>, AppError> {
-    let base_dir = state.smith_base_dir.clone();
-    let query = SmithQuery::new(&base_dir).map_err(|e| AppError::Internal(e.to_string()))?;
-    let runs = query
+    let runs = state
+        .smith_store
         .get_trace(trace_id, &q.project)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let dtos: Vec<RunDto> = runs.iter().map(RunDto::from).collect();
     Ok(Json(dtos))
@@ -147,14 +121,16 @@ async fn get_stats(
     State(state): State<AppState>,
     Query(req): Query<RunFilterRequest>,
 ) -> Result<Json<StatsResponse>, AppError> {
-    let base_dir = state.smith_base_dir.clone();
-    let query = SmithQuery::new(&base_dir).map_err(|e| AppError::Internal(e.to_string()))?;
     let filter: RunFilter = req.into();
-    let tokens = query
+    let tokens = state
+        .smith_store
         .token_usage_summary(&filter)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let latency = query
+    let latency = state
+        .smith_store
         .latency_percentiles(&filter)
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(StatsResponse { tokens, latency }))
 }
@@ -334,7 +310,7 @@ mod tests {
         assert_eq!(result.patched, 1);
 
         // Verify the run was patched
-        let query = SmithQuery::new(dir.path()).unwrap();
+        let query = ayas_smith::query::SmithQuery::new(dir.path()).unwrap();
         let run = query.get_run(run_id, "test-proj").unwrap().unwrap();
         assert_eq!(run.status, ayas_smith::types::RunStatus::Success);
         assert_eq!(run.output.as_deref(), Some("{\"answer\": \"world\"}"));

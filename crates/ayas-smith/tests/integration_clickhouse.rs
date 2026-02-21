@@ -1,7 +1,8 @@
 //! Integration tests for ClickHouseStore.
 //!
-//! Requires: `docker compose -f docker-compose.test.yml up -d clickhouse`
-//! Run with: `cargo test -p ayas-smith --features clickhouse --test integration_clickhouse`
+//! Run with: `cargo test -p ayas-smith --features clickhouse --test integration_clickhouse -- --ignored`
+//!
+//! Requires CLICKHOUSE_URL env var to be set.
 
 #![cfg(feature = "clickhouse")]
 
@@ -14,16 +15,14 @@ use ayas_smith::types::*;
 
 fn make_store() -> ClickHouseStore {
     ClickHouseStore::new()
-        .with_url("http://localhost:18123".into())
-        .with_database("default".into())
 }
 
 async fn setup() -> ClickHouseStore {
     let store = make_store();
     store
-        .create_tables()
+        .init()
         .await
-        .expect("Failed to create ClickHouse tables — is docker-compose.test.yml running?");
+        .expect("Failed to initialize ClickHouse tables — is CLICKHOUSE_URL set?");
     store
 }
 
@@ -35,6 +34,7 @@ fn make_run(name: &str, project: &str, run_type: RunType) -> Run {
 }
 
 #[tokio::test]
+#[ignore]
 async fn put_and_get_run() {
     let store = setup().await;
     let project = format!("ch-get-{}", Uuid::new_v4().as_simple());
@@ -55,6 +55,7 @@ async fn put_and_get_run() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn list_runs_by_project() {
     let store = setup().await;
     let project = format!("ch-list-{}", Uuid::new_v4().as_simple());
@@ -76,6 +77,7 @@ async fn list_runs_by_project() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn trace_hierarchy() {
     let store = setup().await;
     let project = format!("ch-trace-{}", Uuid::new_v4().as_simple());
@@ -107,6 +109,7 @@ async fn trace_hierarchy() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn token_usage_summary() {
     let store = setup().await;
     let project = format!("ch-stats-{}", Uuid::new_v4().as_simple());
@@ -144,6 +147,7 @@ async fn token_usage_summary() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn feedback_crud() {
     let store = setup().await;
     let run_id = Uuid::new_v4();
@@ -179,7 +183,8 @@ async fn feedback_crud() {
 }
 
 #[tokio::test]
-async fn patch_run() {
+#[ignore]
+async fn patch_run_replacing_merge_tree() {
     let store = setup().await;
     let project = format!("ch-patch-{}", Uuid::new_v4().as_simple());
 
@@ -200,11 +205,92 @@ async fn patch_run() {
     };
     store.patch_run(run_id, &project, &patch).await.unwrap();
 
-    // ClickHouse ALTER TABLE UPDATE is async — need to wait for mutation
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // FINAL deduplicates immediately for reads
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let fetched = store.get_run(run_id, &project).await.unwrap();
     assert!(fetched.is_some());
     let fetched = fetched.unwrap();
     assert_eq!(fetched.status, RunStatus::Success);
+    assert_eq!(fetched.output.as_deref(), Some("patched"));
+}
+
+// --- Project management ---
+
+#[tokio::test]
+#[ignore]
+async fn project_crud() {
+    let store = setup().await;
+
+    let project = Project {
+        id: Uuid::new_v4(),
+        name: format!("ch-proj-{}", Uuid::new_v4().as_simple()),
+        description: Some("A ClickHouse test project".into()),
+        created_at: Utc::now(),
+    };
+    store.create_project(&project).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let fetched = store.get_project(project.id).await.unwrap();
+    assert!(fetched.is_some());
+    assert_eq!(fetched.unwrap().name, project.name);
+
+    let all = store.list_projects().await.unwrap();
+    assert!(all.iter().any(|p| p.id == project.id));
+
+    store.delete_project(project.id).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let deleted = store.get_project(project.id).await.unwrap();
+    assert!(deleted.is_none());
+}
+
+// --- Dataset management ---
+
+#[tokio::test]
+#[ignore]
+async fn dataset_and_examples_crud() {
+    let store = setup().await;
+    let project_id = Uuid::new_v4();
+
+    let dataset = Dataset {
+        id: Uuid::new_v4(),
+        name: format!("ch-ds-{}", Uuid::new_v4().as_simple()),
+        description: Some("Test dataset".into()),
+        project_id: Some(project_id),
+        created_at: Utc::now(),
+    };
+    store.create_dataset(&dataset).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let all = store.list_datasets(None).await.unwrap();
+    assert!(all.iter().any(|d| d.id == dataset.id));
+
+    let filtered = store.list_datasets(Some(project_id)).await.unwrap();
+    assert!(filtered.iter().any(|d| d.id == dataset.id));
+
+    // Add examples
+    let examples = vec![
+        Example {
+            id: Uuid::new_v4(),
+            dataset_id: dataset.id,
+            input: r#"{"q":"2+2"}"#.into(),
+            output: Some("4".into()),
+            metadata: None,
+            created_at: Utc::now(),
+        },
+        Example {
+            id: Uuid::new_v4(),
+            dataset_id: dataset.id,
+            input: r#"{"q":"3+3"}"#.into(),
+            output: Some("6".into()),
+            metadata: None,
+            created_at: Utc::now(),
+        },
+    ];
+    store.add_examples(&examples).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let fetched = store.list_examples(dataset.id).await.unwrap();
+    assert_eq!(fetched.len(), 2);
 }

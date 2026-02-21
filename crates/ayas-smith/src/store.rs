@@ -12,6 +12,11 @@ use crate::types::{
 /// Implementations handle persistence of traced runs and feedback.
 #[async_trait]
 pub trait SmithStore: Send + Sync {
+    /// Initialize storage (create tables, directories, etc). Called once at startup.
+    async fn init(&self) -> Result<(), SmithError> {
+        Ok(())
+    }
+
     /// Persist a batch of runs.
     async fn put_runs(&self, runs: &[Run]) -> Result<(), SmithError>;
 

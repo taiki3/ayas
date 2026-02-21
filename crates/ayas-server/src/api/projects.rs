@@ -3,8 +3,6 @@ use axum::{Json, Router, routing::{get, post}};
 use chrono::Utc;
 use uuid::Uuid;
 
-use ayas_smith::duckdb_store::DuckDbStore;
-use ayas_smith::store::SmithStore;
 use ayas_smith::types::Project;
 
 use crate::error::AppError;
@@ -21,14 +19,14 @@ async fn create_project(
     State(state): State<AppState>,
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<Project>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
     let project = Project {
         id: Uuid::new_v4(),
         name: req.name,
         description: req.description,
         created_at: Utc::now(),
     };
-    store
+    state
+        .smith_store
         .create_project(&project)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -38,8 +36,8 @@ async fn create_project(
 async fn list_projects(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Project>>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
-    let projects = store
+    let projects = state
+        .smith_store
         .list_projects()
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -50,8 +48,8 @@ async fn get_project(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Project>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
-    let project = store
+    let project = state
+        .smith_store
         .get_project(id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -65,8 +63,8 @@ async fn delete_project(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
-    store
+    state
+        .smith_store
         .delete_project(id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;

@@ -10,7 +10,7 @@ async fn main() {
         )
         .init();
 
-    let app = ayas_server::app_router();
+    let app = ayas_server::app_router().await;
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3001".to_string());
     let addr = format!("0.0.0.0:{port}");

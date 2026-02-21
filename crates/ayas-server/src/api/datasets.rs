@@ -3,8 +3,6 @@ use axum::{Json, Router, routing::post};
 use chrono::Utc;
 use uuid::Uuid;
 
-use ayas_smith::duckdb_store::DuckDbStore;
-use ayas_smith::store::SmithStore;
 use ayas_smith::types::{Dataset, Example};
 
 use crate::error::AppError;
@@ -24,7 +22,6 @@ async fn create_dataset(
     State(state): State<AppState>,
     Json(req): Json<CreateDatasetRequest>,
 ) -> Result<Json<Dataset>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
     let dataset = Dataset {
         id: Uuid::new_v4(),
         name: req.name,
@@ -32,7 +29,8 @@ async fn create_dataset(
         project_id: req.project_id,
         created_at: Utc::now(),
     };
-    store
+    state
+        .smith_store
         .create_dataset(&dataset)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -43,8 +41,8 @@ async fn list_datasets(
     State(state): State<AppState>,
     Query(q): Query<ListDatasetsQuery>,
 ) -> Result<Json<Vec<Dataset>>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
-    let datasets = store
+    let datasets = state
+        .smith_store
         .list_datasets(q.project_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -56,7 +54,6 @@ async fn add_examples(
     Path(dataset_id): Path<Uuid>,
     Json(req): Json<AddExamplesRequest>,
 ) -> Result<Json<Vec<Example>>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
     let examples: Vec<Example> = req
         .examples
         .into_iter()
@@ -70,7 +67,8 @@ async fn add_examples(
         })
         .collect();
 
-    store
+    state
+        .smith_store
         .add_examples(&examples)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -81,8 +79,8 @@ async fn list_examples(
     State(state): State<AppState>,
     Path(dataset_id): Path<Uuid>,
 ) -> Result<Json<Vec<Example>>, AppError> {
-    let store = DuckDbStore::new(&state.smith_base_dir);
-    let examples = store
+    let examples = state
+        .smith_store
         .list_examples(dataset_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;

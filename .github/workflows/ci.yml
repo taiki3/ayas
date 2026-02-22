@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  ECR_REGISTRY: 150596267098.dkr.ecr.ap-northeast-1.amazonaws.com
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  lint-test:
+    runs-on: arc-runner-set
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust ──
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-arm64-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace --lib
+
+      # ── Node.js (playground) ──
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: playground/node_modules
+          key: npm-${{ hashFiles('playground/package-lock.json') }}
+
+      - name: Install dependencies
+        working-directory: playground
+        run: npm ci
+
+      - name: Build playground
+        working-directory: playground
+        run: npm run build
+
+  build-push:
+    runs-on: arc-runner-set
+    needs: lint-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/ayas-server:latest
+            ${{ env.ECR_REGISTRY }}/ayas-server:sha-${{ github.sha }}
+          build-args: |
+            HTTP_PROXY=${{ vars.HTTP_PROXY }}
+            HTTPS_PROXY=${{ vars.HTTPS_PROXY }}
+            NO_PROXY=${{ vars.NO_PROXY }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/ayas-server:buildcache
+          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/ayas-server:buildcache,mode=max
+
+      - name: Build & push playground image
+        uses: docker/build-push-action@v6
+        with:
+          context: playground
+          file: playground/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/ayas-playground:latest
+            ${{ env.ECR_REGISTRY }}/ayas-playground:sha-${{ github.sha }}
+          build-args: |
+            HTTP_PROXY=${{ vars.HTTP_PROXY }}
+            HTTPS_PROXY=${{ vars.HTTPS_PROXY }}
+            NO_PROXY=${{ vars.NO_PROXY }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/ayas-playground:buildcache
+          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/ayas-playground:buildcache,mode=max

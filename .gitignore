@@ -2,3 +2,7 @@
 /output
 .env
 .env.*
+*.png
+.playwright-cli/
+.playwright-mcp/
+playground/pnpm-lock.yaml

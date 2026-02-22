@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import ApiKeysModal from './ApiKeysModal';
 import { fetchEnvKeys, type EnvKeys } from '../lib/api';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -20,11 +19,8 @@ const TABS = [
 type BackendStatus = 'checking' | 'connected' | 'disconnected';
 
 export default function Layout() {
-  const [keysOpen, setKeysOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
   const [envKeys, setEnvKeys] = useState<EnvKeys | null>(null);
-
-  const allEnvKeys = envKeys != null && envKeys.gemini && envKeys.claude && envKeys.openai;
 
   useEffect(() => {
     let cancelled = false;
@@ -92,16 +88,11 @@ export default function Layout() {
           </nav>
         </div>
         <button
-          onClick={() => !allEnvKeys && setKeysOpen(true)}
-          disabled={!!allEnvKeys}
-          className={`px-3 py-1.5 text-sm border rounded-md transition-colors ${
-            allEnvKeys
-              ? 'text-muted-foreground/50 border-border/50 cursor-not-allowed'
-              : 'text-muted-foreground hover:text-foreground border-border hover:bg-muted'
-          }`}
-          title={allEnvKeys ? 'API keys are configured via environment variables' : 'Configure API keys'}
+          disabled
+          className="px-3 py-1.5 text-sm border rounded-md text-muted-foreground/50 border-border/50 cursor-not-allowed"
+          title={envKeys ? `Keys: ${[envKeys.gemini && 'Gemini', envKeys.claude && 'Claude', envKeys.openai && 'OpenAI'].filter(Boolean).join(', ')}` : 'Checking...'}
         >
-          API Keys{allEnvKeys ? ' (env)' : ''}
+          API Keys (env)
         </button>
       </header>
 
@@ -109,7 +100,6 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      <ApiKeysModal open={keysOpen} onClose={() => setKeysOpen(false)} />
     </div>
   );
 }

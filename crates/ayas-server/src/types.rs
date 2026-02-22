@@ -87,6 +87,9 @@ pub struct GraphEdgeDto {
     /// When true, edges sharing the same `from` node are executed in parallel (fan-out).
     #[serde(default)]
     pub fan_out: bool,
+    /// When true, this edge is only followed when the source node execution fails.
+    #[serde(default)]
+    pub on_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +124,8 @@ pub struct GraphExecuteRequest {
     pub channels: Vec<GraphChannelDto>,
     #[serde(default)]
     pub input: serde_json::Value,
+    #[serde(default)]
+    pub recursion_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +140,8 @@ pub struct GraphStreamRequest {
     /// Defaults to "values" if omitted.
     #[serde(default)]
     pub stream_mode: Option<String>,
+    #[serde(default)]
+    pub recursion_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

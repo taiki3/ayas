@@ -5,12 +5,14 @@ use serde_json::{json, Value};
 use ayas_checkpoint::prelude::interrupt_output;
 use ayas_core::config::RunnableConfig;
 use ayas_core::error::{AyasError, Result};
-use ayas_core::message::Message;
+use ayas_core::message::{AIContent, ContentPart, ContentSource, Message};
 use ayas_core::model::{CallOptions, ChatModel, ResponseFormat};
 use ayas_core::runnable::Runnable;
+use ayas_core::tool::Tool;
 use ayas_deep_research::client::InteractionsClient;
 use ayas_deep_research::runnable::{DeepResearchInput, DeepResearchRunnable};
 use ayas_deep_research::types::ToolConfig;
+use ayas_agent::react::create_react_agent;
 use ayas_graph::channel::ChannelSpec;
 use ayas_graph::compiled::CompiledStateGraph;
 use ayas_graph::constants::END;
@@ -30,11 +32,16 @@ pub type GraphModelFactory =
 pub type GraphResearchFactory =
     Arc<dyn Fn(String) -> Arc<dyn InteractionsClient> + Send + Sync>;
 
+/// Factory function type for creating tools by name.
+pub type GraphToolsFactory =
+    Arc<dyn Fn(&[String]) -> Vec<Arc<dyn Tool>> + Send + Sync>;
+
 /// Context for building a graph with real LLM execution.
 pub struct GraphBuildContext {
     pub factory: GraphModelFactory,
     pub api_keys: ApiKeys,
     pub research_factory: Option<GraphResearchFactory>,
+    pub tools_factory: Option<GraphToolsFactory>,
 }
 
 /// Convert frontend graph DTOs into a compiled StateGraph (backward-compatible).
@@ -104,52 +111,157 @@ pub fn convert_to_state_graph_with_context(
         finish_nodes.push("__passthrough__".to_string());
     }
 
+    // Collect nodes that have on_error outgoing edges
+    let mut error_edge_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for edge in edges {
+        if edge.on_error {
+            error_edge_nodes.insert(edge.from.clone());
+        }
+    }
+
+    // If there are error edges, add a __error channel for routing
+    if !error_edge_nodes.is_empty() {
+        graph.add_channel("__error", ChannelSpec::LastValue { default: Value::Null });
+    }
+
     // Wrap context in Arc so it can be shared across node closures
     let ctx = context.map(Arc::new);
 
+    // Helper: wrap a node function with retry + error catching when needed
+    // If the node has on_error edges, catch errors and set state.__error instead of propagating
+    // If the node has max_retries in config, retry with exponential backoff
+    fn wrap_node_fn<F>(
+        id: String,
+        has_error_edge: bool,
+        max_retries: usize,
+        inner: F,
+    ) -> NodeFn
+    where
+        F: Fn(Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let inner = Arc::new(inner);
+        NodeFn::new(id, move |state: Value, _cfg| {
+            let inner = inner.clone();
+            let state_clone = state.clone();
+            Box::pin(async move {
+                let mut last_err = String::new();
+                for attempt in 0..=max_retries {
+                    if attempt > 0 {
+                        let delay = std::time::Duration::from_millis(100 * (1 << (attempt - 1)));
+                        tokio::time::sleep(delay).await;
+                    }
+                    match inner(state_clone.clone()).await {
+                        Ok(val) => return Ok(val),
+                        Err(e) => {
+                            last_err = e.to_string();
+                            if attempt == max_retries {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // All retries exhausted
+                if has_error_edge {
+                    // Set __error in state and return successfully so error edges can route
+                    let mut output = state_clone;
+                    if let Value::Object(ref mut map) = output {
+                        map.insert("__error".to_string(), Value::String(last_err));
+                    }
+                    Ok(output)
+                } else {
+                    Err(AyasError::Other(last_err))
+                }
+            })
+        })
+    }
+
     // Add nodes (skip start/end - they are virtual)
     for node in nodes {
+        let has_error_edge = error_edge_nodes.contains(&node.id);
+        let node_config = node.config.clone().unwrap_or(Value::Null);
+        let max_retries = node_config
+            .get("max_retries")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
         match node.node_type.as_str() {
             "start" | "end" => continue,
             "llm" => {
-                let config = node.config.clone().unwrap_or(Value::Null);
+                let config = node_config;
                 let id = node.id.clone();
                 let ctx = ctx.clone();
 
-                let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
-                    let config = config.clone();
-                    let ctx = ctx.clone();
-                    Box::pin(async move {
-                        build_llm_node(state, &config, ctx.as_deref()).await
-                    })
-                });
+                let node_fn = wrap_node_fn(
+                    id,
+                    has_error_edge,
+                    max_retries,
+                    move |state: Value| {
+                        let config = config.clone();
+                        let ctx = ctx.clone();
+                        Box::pin(async move {
+                            build_llm_node(state, &config, ctx.as_deref()).await
+                        })
+                    },
+                );
                 graph.add_node(node_fn)?;
             }
             "transform" => {
-                let config = node.config.clone().unwrap_or(Value::Null);
+                let config = node_config;
                 let id = node.id.clone();
-                let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
-                    let config = config.clone();
-                    Box::pin(async move { build_transform_node(state, &config) })
-                });
+                let node_fn = wrap_node_fn(
+                    id,
+                    has_error_edge,
+                    max_retries,
+                    move |state: Value| {
+                        let config = config.clone();
+                        Box::pin(async move { build_transform_node(state, &config) })
+                    },
+                );
                 graph.add_node(node_fn)?;
             }
             "deep_research" => {
-                let config = node.config.clone().unwrap_or(Value::Null);
+                let config = node_config;
                 let id = node.id.clone();
                 let ctx = ctx.clone();
 
-                let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
-                    let config = config.clone();
-                    let ctx = ctx.clone();
-                    Box::pin(async move {
-                        build_deep_research_node(state, &config, ctx.as_deref()).await
-                    })
-                });
+                let node_fn = wrap_node_fn(
+                    id,
+                    has_error_edge,
+                    max_retries,
+                    move |state: Value| {
+                        let config = config.clone();
+                        let ctx = ctx.clone();
+                        Box::pin(async move {
+                            build_deep_research_node(state, &config, ctx.as_deref()).await
+                        })
+                    },
+                );
+                graph.add_node(node_fn)?;
+            }
+            "agent" => {
+                let config = node_config;
+                let id = node.id.clone();
+                let ctx = ctx.clone();
+
+                let node_fn = wrap_node_fn(
+                    id,
+                    has_error_edge,
+                    max_retries,
+                    move |state: Value| {
+                        let config = config.clone();
+                        let ctx = ctx.clone();
+                        Box::pin(async move {
+                            build_agent_node(state, &config, ctx.as_deref()).await
+                        })
+                    },
+                );
                 graph.add_node(node_fn)?;
             }
             "interrupt" => {
-                let config = node.config.clone().unwrap_or(Value::Null);
+                let config = node_config;
                 let id = node.id.clone();
                 let node_fn = NodeFn::new(id, move |state: Value, _cfg| {
                     let config = config.clone();
@@ -198,9 +310,41 @@ pub fn convert_to_state_graph_with_context(
     let mut fan_out_groups: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
 
+    // Collect on_error routing: source → (error_target, normal_target)
+    // normal_target is the non-error, non-fan-out outgoing edge target (or END)
+    let mut on_error_targets: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for edge in edges {
+        if edge.on_error && edge.from != "start" {
+            on_error_targets.insert(edge.from.clone(), edge.to.clone());
+        }
+    }
+    // For error-edge sources, find their normal targets
+    let mut error_node_normal_targets: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for edge in edges {
+        if !edge.on_error && !edge.fan_out && on_error_targets.contains_key(&edge.from) {
+            error_node_normal_targets.insert(edge.from.clone(), edge.to.clone());
+        }
+    }
+    // Remove error-edge sources from finish_nodes (we'll handle routing via conditional edges)
+    for src in on_error_targets.keys() {
+        finish_nodes.retain(|fp| fp != src);
+    }
+
     // Add edges (skip start→X and X→end, handled by entry/finish points)
     for edge in edges {
         if edge.from == "start" || edge.to == "end" {
+            continue;
+        }
+
+        // Skip on_error edges (handled via conditional edges below)
+        if edge.on_error {
+            continue;
+        }
+
+        // Skip normal edges from error-source nodes (handled via conditional edges below)
+        if on_error_targets.contains_key(&edge.from) && !edge.fan_out {
             continue;
         }
 
@@ -217,16 +361,46 @@ pub fn convert_to_state_graph_with_context(
             let condition = condition.clone();
             let to_target = edge.to.clone();
 
+            // Detect if the condition is a Rhai expression (contains operators) or simple key
+            let is_expression = condition.contains('>')
+                || condition.contains('<')
+                || condition.contains("==")
+                || condition.contains("!=")
+                || condition.contains("&&")
+                || condition.contains("||")
+                || condition.contains('(')
+                || condition.contains('!');
+
             let cond_edge = ConditionalEdge::new(
                 &edge.from,
                 move |state: &Value| {
-                    if let Some(val) = state.get(&condition)
-                        && (val.as_bool().unwrap_or(false)
-                            || val.as_str().is_some_and(|s| !s.is_empty()))
-                    {
-                        return to_target.clone();
+                    if is_expression {
+                        // Rhai expression evaluation
+                        let mut engine = rhai::Engine::new();
+                        engine.set_max_operations(10_000);
+                        engine.set_max_call_levels(8);
+                        engine.set_max_expr_depths(32, 16);
+
+                        if let Ok(dynamic_state) = rhai::serde::to_dynamic(state) {
+                            let mut scope = rhai::Scope::new();
+                            scope.push_dynamic("state", dynamic_state);
+                            if let Ok(result) = engine.eval_with_scope::<bool>(&mut scope, &condition) {
+                                if result {
+                                    return to_target.clone();
+                                }
+                            }
+                        }
+                        END.to_string()
+                    } else {
+                        // Simple key check (legacy behavior)
+                        if let Some(val) = state.get(&condition)
+                            && (val.as_bool().unwrap_or(false)
+                                || val.as_str().is_some_and(|s| !s.is_empty()))
+                        {
+                            return to_target.clone();
+                        }
+                        END.to_string()
                     }
-                    END.to_string()
                 },
                 None,
             );
@@ -251,7 +425,52 @@ pub fn convert_to_state_graph_with_context(
         graph.add_conditional_fan_out_edges(fan_out);
     }
 
+    // Add on_error routing: conditional edges that route to error_target if __error is set
+    for (from, error_target) in &on_error_targets {
+        let raw_target = error_node_normal_targets
+            .get(from)
+            .cloned()
+            .unwrap_or_else(|| "end".to_string());
+        // Map "end" to the graph framework's END constant
+        let to_normal = if raw_target == "end" { END.to_string() } else { raw_target };
+        let to_error = if error_target == "end" { END.to_string() } else { error_target.clone() };
+        let cond_edge = ConditionalEdge::new(
+            from,
+            move |state: &Value| {
+                if state.get("__error").is_some_and(|v| !v.is_null()) {
+                    to_error.clone()
+                } else {
+                    to_normal.clone()
+                }
+            },
+            None,
+        );
+        graph.add_conditional_edges(cond_edge);
+    }
+
     graph.compile()
+}
+
+/// Parse `config.attachments` array into ContentPart items.
+///
+/// Each attachment is `{ data: "<base64>", media_type: "image/png", name?: "..." }`.
+/// Images (image/*) → `ContentPart::Image`, others → `ContentPart::File`.
+fn parse_attachments(config: &Value) -> Vec<ContentPart> {
+    let Some(arr) = config.get("attachments").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|a| {
+            let data = a.get("data")?.as_str()?.to_string();
+            let media_type = a.get("media_type")?.as_str()?.to_string();
+            let source = ContentSource::Base64 { media_type: media_type.clone(), data };
+            if media_type.starts_with("image/") {
+                Some(ContentPart::Image { source })
+            } else {
+                Some(ContentPart::File { source })
+            }
+        })
+        .collect()
 }
 
 /// Build LLM node logic: calls a real ChatModel if context is available, otherwise dummy.
@@ -320,7 +539,16 @@ async fn build_llm_node(
     if !prompt.is_empty() {
         messages.push(Message::system(prompt));
     }
-    messages.push(Message::user(user_input.as_str()));
+
+    // Build user message: multimodal if attachments present
+    let attachment_parts = parse_attachments(config);
+    if attachment_parts.is_empty() {
+        messages.push(Message::user(user_input.as_str()));
+    } else {
+        let mut parts = vec![ContentPart::Text { text: user_input }];
+        parts.extend(attachment_parts);
+        messages.push(Message::user_with_parts(parts));
+    }
 
     let temperature = config
         .get("temperature")
@@ -328,21 +556,85 @@ async fn build_llm_node(
     let response_format = config
         .get("response_format")
         .and_then(|v| serde_json::from_value::<ResponseFormat>(v.clone()).ok());
+
+    // Build tools if specified
+    let tool_names: Vec<String> = config
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let tools: Vec<Arc<dyn Tool>> = if !tool_names.is_empty() {
+        ctx.tools_factory
+            .as_ref()
+            .map(|f| f(&tool_names))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let tool_defs: Vec<ayas_core::tool::ToolDefinition> =
+        tools.iter().map(|t| t.definition()).collect();
+    let tools_map: std::collections::HashMap<String, Arc<dyn Tool>> =
+        tools.into_iter().map(|t| (t.definition().name, t)).collect();
+
+    let max_tool_iterations = config
+        .get("max_tool_iterations")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as usize;
+
     let options = CallOptions {
         temperature,
         response_format,
+        tools: tool_defs,
         ..Default::default()
     };
 
-    let result = model.generate(&messages, &options).await?;
-    let response_text = result.message.content().to_string();
+    // Tool-calling loop: LLM → tool execution → LLM → ... until no tool calls or limit
+    let mut iteration = 0;
+    loop {
+        let result = model.generate(&messages, &options).await?;
 
-    let mut state = state;
-    if let Value::Object(ref mut map) = state {
-        map.insert(output_channel.to_string(), Value::String(response_text));
+        // Check for tool calls
+        let tool_calls = match &result.message {
+            Message::AI(AIContent { tool_calls, .. }) if !tool_calls.is_empty() => {
+                tool_calls.clone()
+            }
+            _ => {
+                // No tool calls — we're done
+                let response_text = result.message.content().to_string();
+                let mut state = state;
+                if let Value::Object(ref mut map) = state {
+                    map.insert(output_channel.to_string(), Value::String(response_text));
+                }
+                return Ok(state);
+            }
+        };
+
+        iteration += 1;
+        if iteration > max_tool_iterations {
+            // Exceeded iteration limit — return last content
+            let response_text = result.message.content().to_string();
+            let mut state = state;
+            if let Value::Object(ref mut map) = state {
+                map.insert(output_channel.to_string(), Value::String(response_text));
+            }
+            return Ok(state);
+        }
+
+        // Add AI message with tool calls to conversation
+        messages.push(result.message);
+
+        // Execute tool calls
+        for tc in tool_calls {
+            let output = if let Some(tool) = tools_map.get(&tc.name) {
+                tool.call(tc.arguments.clone()).await.unwrap_or_else(|e| format!("Tool error: {e}"))
+            } else {
+                format!("Unknown tool: {}", tc.name)
+            };
+            messages.push(Message::tool(output, &tc.id));
+        }
     }
-
-    Ok(state)
 }
 
 /// Build Deep Research node logic: calls the Interactions API if context is available.
@@ -471,6 +763,135 @@ async fn build_deep_research_node(
     let mut state = state;
     if let Value::Object(ref mut map) = state {
         map.insert(output_channel.to_string(), Value::String(output.text));
+    }
+
+    Ok(state)
+}
+
+/// Build Agent node logic: wraps create_react_agent as a single graph node.
+async fn build_agent_node(
+    state: Value,
+    config: &Value,
+    context: Option<&GraphBuildContext>,
+) -> Result<Value> {
+    let input_channel = config
+        .get("input_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+    let output_channel = config
+        .get("output_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("value");
+    let system_prompt = config
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let Some(ctx) = context else {
+        // No context: dummy behavior
+        let mut state = state;
+        if let Value::Object(ref mut map) = state {
+            map.insert(
+                output_channel.to_string(),
+                Value::String("(agent: no context)".to_string()),
+            );
+        }
+        return Ok(state);
+    };
+
+    let provider_str = config
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gemini");
+    let provider = match provider_str {
+        "claude" | "anthropic" => Provider::Claude,
+        "openai" => Provider::OpenAI,
+        _ => Provider::Gemini,
+    };
+    let model_id = config
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gemini-2.5-flash")
+        .to_string();
+
+    let api_key = ctx.api_keys.get_key_for(&provider).map_err(|e| {
+        AyasError::Other(format!("API key error: {e:?}"))
+    })?;
+
+    let model: Arc<dyn ChatModel> = Arc::from((ctx.factory)(&provider, api_key, model_id));
+
+    // Build tools
+    let tool_names: Vec<String> = config
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let tools: Vec<Arc<dyn Tool>> = if !tool_names.is_empty() {
+        ctx.tools_factory
+            .as_ref()
+            .map(|f| f(&tool_names))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Read user input from state
+    let user_input = match state.get(input_channel) {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+
+    // Build initial messages (multimodal if attachments present)
+    let mut initial_messages: Vec<Value> = Vec::new();
+    if !system_prompt.is_empty() {
+        initial_messages.push(serde_json::to_value(&Message::system(system_prompt))
+            .map_err(AyasError::Serialization)?);
+    }
+    let attachment_parts = parse_attachments(config);
+    let user_msg = if attachment_parts.is_empty() {
+        Message::user(user_input.as_str())
+    } else {
+        let mut parts = vec![ContentPart::Text { text: user_input }];
+        parts.extend(attachment_parts);
+        Message::user_with_parts(parts)
+    };
+    initial_messages.push(serde_json::to_value(&user_msg)
+        .map_err(AyasError::Serialization)?);
+
+    // Create and run the ReAct agent
+    let agent_graph = create_react_agent(model, tools)?;
+
+    let recursion_limit = config
+        .get("recursion_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(25) as usize;
+    let agent_config = RunnableConfig {
+        recursion_limit,
+        ..Default::default()
+    };
+
+    let agent_input = json!({"messages": initial_messages});
+    let agent_output = agent_graph.invoke(agent_input, &agent_config).await?;
+
+    // Extract the last AI message content from the agent output
+    let response_text = agent_output
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .rev()
+                .find(|m| m.get("type").and_then(|t| t.as_str()) == Some("ai"))
+        })
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut state = state;
+    if let Value::Object(ref mut map) = state {
+        map.insert(output_channel.to_string(), Value::String(response_text));
     }
 
     Ok(state)
@@ -612,6 +1033,7 @@ mod tests {
             to: to.into(),
             condition: None,
             fan_out: false,
+            on_error: false,
         }
     }
 
@@ -621,6 +1043,7 @@ mod tests {
             to: to.into(),
             condition: None,
             fan_out: true,
+            on_error: false,
         }
     }
 
@@ -680,6 +1103,7 @@ mod tests {
                 to: "branch_a".into(),
                 condition: Some("flag".into()),
                 fan_out: false,
+                on_error: false,
             },
             edge("branch_a", "end"),
         ];
@@ -728,6 +1152,7 @@ mod tests {
                 to: "handler_a".into(),
                 condition: Some("route_a".into()),
                 fan_out: false,
+                on_error: false,
             },
             edge("handler_a", "end"),
             edge("handler_b", "end"),
@@ -815,6 +1240,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: None,
+            tools_factory: None,
         };
 
         let compiled = convert_to_state_graph_with_context(
@@ -879,6 +1305,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: None,
+            tools_factory: None,
         };
 
         let compiled = convert_to_state_graph_with_context(
@@ -1008,6 +1435,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: Some(mock_research_factory("Deep research output")),
+            tools_factory: None,
         };
 
         let compiled =
@@ -1041,6 +1469,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: Some(mock_research_factory("Template research result")),
+            tools_factory: None,
         };
 
         let compiled =
@@ -1076,6 +1505,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: Some(mock_research_factory("Research with attachments")),
+            tools_factory: None,
         };
 
         let compiled =
@@ -1113,6 +1543,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: Some(mock_research_factory("File search research result")),
+            tools_factory: None,
         };
 
         let compiled =
@@ -1146,6 +1577,7 @@ mod tests {
                 ..Default::default()
             },
             research_factory: Some(mock_research_factory("Research with direct text")),
+            tools_factory: None,
         };
 
         let compiled =
@@ -1244,5 +1676,505 @@ mod tests {
         let channels = vec![channel("value", "LastValue")];
         let errors = validate_graph(&nodes, &edges, &channels);
         assert!(errors.is_empty(), "Validation should pass: {:?}", errors);
+    }
+
+    // --- Rhai expression condition tests ---
+
+    #[tokio::test]
+    async fn test_conditional_edge_rhai_expression() {
+        let nodes = vec![
+            node("check", "passthrough"),
+            node("high", "transform"),
+            node("low", "passthrough"),
+        ];
+        let mut high = nodes[1].clone();
+        high.config = Some(json!({ "expression": "\"high_path\"", "output_channel": "result" }));
+        let nodes = vec![nodes[0].clone(), high, nodes[2].clone()];
+
+        let edges = vec![
+            edge("start", "check"),
+            GraphEdgeDto {
+                from: "check".into(),
+                to: "high".into(),
+                condition: Some("state.score > 50".into()),
+                fan_out: false,
+                on_error: false,
+            },
+            edge("high", "end"),
+            edge("low", "end"),
+        ];
+        let channels = vec![
+            channel("score", "LastValue"),
+            channel("result", "LastValue"),
+            channel("value", "LastValue"),
+        ];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+        let config = ayas_core::config::RunnableConfig::default();
+
+        // Score > 50 → should route to "high"
+        let input = json!({"score": 75, "result": "", "value": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "high_path");
+    }
+
+    #[tokio::test]
+    async fn test_conditional_edge_rhai_expression_false() {
+        let nodes = vec![
+            node("check", "passthrough"),
+            node("high", "transform"),
+        ];
+        let mut high = nodes[1].clone();
+        high.config = Some(json!({ "expression": "\"high_path\"", "output_channel": "result" }));
+        let nodes = vec![nodes[0].clone(), high];
+
+        let edges = vec![
+            edge("start", "check"),
+            GraphEdgeDto {
+                from: "check".into(),
+                to: "high".into(),
+                condition: Some("state.score > 50".into()),
+                fan_out: false,
+                on_error: false,
+            },
+            edge("high", "end"),
+        ];
+        let channels = vec![
+            channel("score", "LastValue"),
+            channel("result", "LastValue"),
+            channel("value", "LastValue"),
+        ];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+        let config = ayas_core::config::RunnableConfig::default();
+
+        // Score <= 50 → should route to END (expression returns false)
+        let input = json!({"score": 30, "result": "", "value": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        // high node never ran, so result stays empty
+        assert_eq!(output["result"], "");
+    }
+
+    // --- LLM tool-calling tests ---
+
+    use ayas_core::message::ToolCall;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Mock model that returns tool_calls on first call, then a final text response.
+    struct MockToolCallingModel {
+        call_count: Arc<AtomicUsize>,
+        final_response: String,
+    }
+
+    #[async_trait]
+    impl ChatModel for MockToolCallingModel {
+        async fn generate(
+            &self,
+            _messages: &[Message],
+            _options: &CallOptions,
+        ) -> ayas_core::error::Result<ChatResult> {
+            let count = self.call_count.fetch_add(1, Ordering::Relaxed);
+            if count == 0 {
+                // First call: return tool call
+                Ok(ChatResult {
+                    message: Message::AI(AIContent {
+                        content: String::new(),
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "calculator".into(),
+                            arguments: json!({"expression": "2+3"}),
+                        }],
+                        usage: None,
+                    }),
+                    usage: None,
+                })
+            } else {
+                // Second call: return final text
+                Ok(ChatResult {
+                    message: Message::AI(AIContent {
+                        content: self.final_response.clone(),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                    }),
+                    usage: None,
+                })
+            }
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-tool-calling-model"
+        }
+    }
+
+    fn mock_tool_calling_factory(response: &str) -> (GraphModelFactory, Arc<AtomicUsize>) {
+        let resp = response.to_string();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        let factory: GraphModelFactory = Arc::new(move |_p, _k, _m| {
+            Box::new(MockToolCallingModel {
+                call_count: counter_clone.clone(),
+                final_response: resp.clone(),
+            })
+        });
+        (factory, counter)
+    }
+
+    fn mock_tools_factory() -> GraphToolsFactory {
+        Arc::new(|names: &[String]| {
+            let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+            if names.contains(&"calculator".to_string()) {
+                tools.push(Arc::new(crate::tools::calculator::CalculatorTool));
+            }
+            if names.contains(&"datetime".to_string()) {
+                tools.push(Arc::new(crate::tools::datetime::DateTimeTool));
+            }
+            tools
+        })
+    }
+
+    #[tokio::test]
+    async fn test_llm_node_tool_calling_loop() {
+        let (factory, call_count) = mock_tool_calling_factory("The answer is 5");
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "You are a calculator assistant",
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "tools": ["calculator"],
+            "max_tool_iterations": 3
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let context = GraphBuildContext {
+            factory,
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: None,
+            tools_factory: Some(mock_tools_factory()),
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "What is 2+3?"});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["value"], "The answer is 5");
+        // Model should have been called twice: once with tool call, once with final response
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_llm_node_no_tools_no_loop() {
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "Hello",
+            "provider": "gemini",
+            "model": "gemini-2.5-flash"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let context = GraphBuildContext {
+            factory: mock_factory("Direct response"),
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: None,
+            tools_factory: Some(mock_tools_factory()),
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "Hello"});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["value"], "Direct response");
+    }
+
+    // --- Agent node tests ---
+
+    #[tokio::test]
+    async fn test_agent_node_without_context() {
+        let mut n = node("agent_1", "agent");
+        n.config = Some(json!({
+            "system_prompt": "You are a helper",
+            "tools": ["calculator"],
+            "output_channel": "result"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "agent_1"), edge("agent_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        let compiled =
+            convert_to_state_graph_with_context(&nodes, &edges, &channels, None).unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "(agent: no context)");
+    }
+
+    #[tokio::test]
+    async fn test_agent_node_with_mock() {
+        let mut n = node("agent_1", "agent");
+        n.config = Some(json!({
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "system_prompt": "You are a helpful assistant",
+            "tools": ["calculator"],
+            "recursion_limit": 10,
+            "input_channel": "value",
+            "output_channel": "result"
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "agent_1"), edge("agent_1", "end")];
+        let channels = vec![
+            channel("value", "LastValue"),
+            channel("result", "LastValue"),
+        ];
+
+        // Use the tool-calling factory so agent runs: tool call → tool execution → final response
+        let (factory, call_count) = mock_tool_calling_factory("Agent final answer");
+        let context = GraphBuildContext {
+            factory,
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: None,
+            tools_factory: Some(mock_tools_factory()),
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "What is 2+3?", "result": ""});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["result"], "Agent final answer");
+        // Agent graph internally calls model: agent(1st) → tools → agent(2nd: final)
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+
+    // --- Error edge tests ---
+
+    #[tokio::test]
+    async fn test_error_edge_routes_to_error_handler() {
+        // Use an LLM node with a failing mock model and on_error edge
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+        let factory: GraphModelFactory = Arc::new(move |_p, _k, _m| {
+            Box::new(MockFailingModel {
+                fail_count: 100, // always fails
+                call_count: cc.clone(),
+            })
+        });
+
+        let mut fail_node = node("fail_node", "llm");
+        fail_node.config = Some(json!({
+            "prompt": "test",
+            "provider": "gemini",
+            "model": "gemini-2.5-flash"
+        }));
+        let handler = node("handler", "passthrough");
+
+        let nodes = vec![fail_node, handler];
+        let edges = vec![
+            edge("start", "fail_node"),
+            GraphEdgeDto {
+                from: "fail_node".into(),
+                to: "end".into(),
+                condition: None,
+                fan_out: false,
+                on_error: false,
+            },
+            GraphEdgeDto {
+                from: "fail_node".into(),
+                to: "handler".into(),
+                condition: None,
+                fan_out: false,
+                on_error: true,
+            },
+            edge("handler", "end"),
+        ];
+        let channels = vec![channel("value", "LastValue")];
+
+        let context = GraphBuildContext {
+            factory,
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: None,
+            tools_factory: None,
+        };
+
+        let compiled = convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context)).unwrap();
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test"});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        // The error should be captured in __error and routed to handler (passthrough)
+        assert!(output["__error"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_no_error_edge_propagates_error() {
+        // Without on_error edge, the error should propagate
+        let mut fail_node = node("fail_node", "transform");
+        fail_node.config = Some(json!({ "expression": "undefined_var.crash()", "output_channel": "value" }));
+
+        let nodes = vec![fail_node];
+        let edges = vec![edge("start", "fail_node"), edge("fail_node", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let compiled = convert_to_state_graph(&nodes, &edges, &channels).unwrap();
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test"});
+        let result = compiled.invoke(input, &config).await;
+        assert!(result.is_err());
+    }
+
+    // --- Retry tests ---
+
+    /// Mock model that fails N times then succeeds.
+    struct MockFailingModel {
+        fail_count: usize,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ChatModel for MockFailingModel {
+        async fn generate(
+            &self,
+            _messages: &[Message],
+            _options: &CallOptions,
+        ) -> ayas_core::error::Result<ChatResult> {
+            let count = self.call_count.fetch_add(1, Ordering::Relaxed);
+            if count < self.fail_count {
+                Err(ayas_core::error::AyasError::Other(format!(
+                    "Intentional failure #{count}"
+                )))
+            } else {
+                Ok(ChatResult {
+                    message: Message::AI(AIContent {
+                        content: "recovered".into(),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                    }),
+                    usage: None,
+                })
+            }
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-failing-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_succeeds_after_failures() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+        let factory: GraphModelFactory = Arc::new(move |_p, _k, _m| {
+            Box::new(MockFailingModel {
+                fail_count: 2,
+                call_count: cc.clone(),
+            })
+        });
+
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "test",
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "max_retries": 3
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let context = GraphBuildContext {
+            factory,
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: None,
+            tools_factory: None,
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test"});
+        let output = compiled.invoke(input, &config).await.unwrap();
+        assert_eq!(output["value"], "recovered");
+        // Should have been called 3 times: 2 failures + 1 success
+        assert_eq!(call_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_exhausted_returns_error() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+        let factory: GraphModelFactory = Arc::new(move |_p, _k, _m| {
+            Box::new(MockFailingModel {
+                fail_count: 10,
+                call_count: cc.clone(),
+            })
+        });
+
+        let mut n = node("llm_1", "llm");
+        n.config = Some(json!({
+            "prompt": "test",
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "max_retries": 2
+        }));
+        let nodes = vec![n];
+        let edges = vec![edge("start", "llm_1"), edge("llm_1", "end")];
+        let channels = vec![channel("value", "LastValue")];
+
+        let context = GraphBuildContext {
+            factory,
+            api_keys: ApiKeys {
+                gemini_key: Some("test-key".into()),
+                ..Default::default()
+            },
+            research_factory: None,
+            tools_factory: None,
+        };
+
+        let compiled = convert_to_state_graph_with_context(
+            &nodes, &edges, &channels, Some(context),
+        )
+        .unwrap();
+
+        let config = ayas_core::config::RunnableConfig::default();
+        let input = json!({"value": "test"});
+        let result = compiled.invoke(input, &config).await;
+        assert!(result.is_err());
+        // 1 initial + 2 retries = 3 total attempts
+        assert_eq!(call_count.load(Ordering::Relaxed), 3);
     }
 }

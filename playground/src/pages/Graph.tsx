@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   ReactFlow,
   addEdge,
@@ -18,11 +18,15 @@ import '@xyflow/react/dist/style.css';
 import {
   graphValidate,
   graphInvokeStream,
+  graphGenerate,
+  graphExecuteResumable,
+  graphResume,
   saveGraph,
   listGraphs,
   getGraph,
   updateGraph,
   deleteGraph,
+  type Provider,
   type GraphNodeDto,
   type GraphEdgeDto,
   type GraphChannelDto,
@@ -30,6 +34,8 @@ import {
   type GraphData,
   type GraphListItem,
 } from '../lib/api';
+import { GRAPH_TEMPLATES, type GraphTemplate } from '../data/graph-templates';
+import dagre from '@dagrejs/dagre';
 
 // --- Custom Node Components ---
 
@@ -96,6 +102,36 @@ function TransformNode({ data }: { data: { label: string; active?: boolean } }) 
   );
 }
 
+function InterruptNode({ data }: { data: { label: string; active?: boolean } }) {
+  return (
+    <div className={`px-4 py-2 border-2 rounded-lg text-sm min-w-[120px] ${
+      data.active ? 'border-amber-500 bg-amber-50 animate-pulse' : 'border-amber-300 bg-amber-50'
+    }`}>
+      <Handle type="target" position={Position.Top} className="!bg-amber-500" />
+      <div className="flex items-center gap-1.5">
+        <span className="text-base">&#x23F8;</span>
+        <span className="font-medium text-foreground">{data.label}</span>
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!bg-amber-500" />
+    </div>
+  );
+}
+
+function AgentNode({ data }: { data: { label: string; active?: boolean } }) {
+  return (
+    <div className={`px-4 py-2 border-2 rounded-lg text-sm min-w-[120px] ${
+      data.active ? 'border-emerald-500 bg-emerald-50 animate-pulse' : 'border-emerald-300 bg-emerald-50'
+    }`}>
+      <Handle type="target" position={Position.Top} className="!bg-emerald-500" />
+      <div className="flex items-center gap-1.5">
+        <span className="text-base">&#x1F916;</span>
+        <span className="font-medium text-foreground">{data.label}</span>
+      </div>
+      <Handle type="source" position={Position.Bottom} className="!bg-emerald-500" />
+    </div>
+  );
+}
+
 function DeepResearchNode({ data }: { data: { label: string; active?: boolean } }) {
   return (
     <div className={`px-4 py-2 border-2 rounded-lg text-sm min-w-[120px] ${
@@ -115,6 +151,8 @@ const nodeTypes: NodeTypes = {
   start: StartNode,
   end: EndNode,
   llm: LlmNode,
+  agent: AgentNode,
+  interrupt: InterruptNode,
   conditional: ConditionalNode,
   transform: TransformNode,
   passthrough: TransformNode,
@@ -160,11 +198,25 @@ const MODEL_OPTIONS: Record<string, { id: string; label: string }[]> = {
   ],
 };
 
+const AVAILABLE_TOOLS = ['calculator', 'datetime', 'web_search'];
+
 const DEFAULT_LLM_CONFIG: NodeConfig = {
   provider: 'gemini',
   model: 'gemini-2.5-flash',
   prompt: '',
   temperature: 0.7,
+  input_channel: 'value',
+  output_channel: 'value',
+  tools: [] as string[],
+  max_tool_iterations: 5,
+};
+
+const DEFAULT_AGENT_CONFIG: NodeConfig = {
+  provider: 'gemini',
+  model: 'gemini-2.5-flash',
+  system_prompt: '',
+  tools: ['calculator', 'datetime'] as string[],
+  recursion_limit: 25,
   input_channel: 'value',
   output_channel: 'value',
 };
@@ -201,6 +253,76 @@ export default function Graph() {
   const [runOutput, setRunOutput] = useState<string | null>(null);
   const [runSteps, setRunSteps] = useState<GraphSseEvent[]>([]);
   const [running, setRunning] = useState(false);
+  const [recursionLimit, setRecursionLimit] = useState(25);
+  const [hitlMode, setHitlMode] = useState(false);
+  const [hitlSessionId, setHitlSessionId] = useState<string | null>(null);
+  const [hitlInterruptValue, setHitlInterruptValue] = useState<string>('');
+  const [hitlResumeInput, setHitlResumeInput] = useState('');
+  const [stateHistory, setStateHistory] = useState<Map<string, { step: number; state: Record<string, unknown> }[]>>(new Map());
+  const [inspectorTab, setInspectorTab] = useState<'config' | 'state'>('config');
+
+  // Undo/Redo
+  type GraphSnapshot = { nodes: Node[]; edges: Edge[]; channels: ChannelEntry[] };
+  const undoStack = useRef<GraphSnapshot[]>([]);
+  const redoStack = useRef<GraphSnapshot[]>([]);
+  const skipSnapshot = useRef(false);
+
+  const pushUndo = useCallback(() => {
+    if (skipSnapshot.current) return;
+    undoStack.current.push({
+      nodes: JSON.parse(JSON.stringify(nodes)),
+      edges: JSON.parse(JSON.stringify(edges)),
+      channels: JSON.parse(JSON.stringify(channels)),
+    });
+    redoStack.current = [];
+    if (undoStack.current.length > 50) undoStack.current.shift();
+  }, [nodes, edges, channels]);
+
+  const handleUndo = useCallback(() => {
+    if (undoStack.current.length === 0) return;
+    redoStack.current.push({
+      nodes: JSON.parse(JSON.stringify(nodes)),
+      edges: JSON.parse(JSON.stringify(edges)),
+      channels: JSON.parse(JSON.stringify(channels)),
+    });
+    const snap = undoStack.current.pop()!;
+    skipSnapshot.current = true;
+    setNodes(snap.nodes);
+    setEdges(snap.edges);
+    setChannels(snap.channels);
+    setTimeout(() => { skipSnapshot.current = false; }, 50);
+  }, [nodes, edges, channels, setNodes, setEdges]);
+
+  const handleRedo = useCallback(() => {
+    if (redoStack.current.length === 0) return;
+    undoStack.current.push({
+      nodes: JSON.parse(JSON.stringify(nodes)),
+      edges: JSON.parse(JSON.stringify(edges)),
+      channels: JSON.parse(JSON.stringify(channels)),
+    });
+    const snap = redoStack.current.pop()!;
+    skipSnapshot.current = true;
+    setNodes(snap.nodes);
+    setEdges(snap.edges);
+    setChannels(snap.channels);
+    setTimeout(() => { skipSnapshot.current = false; }, 50);
+  }, [nodes, edges, channels, setNodes, setEdges]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && e.shiftKey) {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleUndo, handleRedo]);
   const [addNodeModal, setAddNodeModal] = useState(false);
   const [newNodeType, setNewNodeType] = useState('llm');
   const [newNodeLabel, setNewNodeLabel] = useState('');
@@ -212,10 +334,21 @@ export default function Graph() {
   const [loadModal, setLoadModal] = useState(false);
   const [savedGraphs, setSavedGraphs] = useState<GraphListItem[]>([]);
   const [saveName, setSaveName] = useState('');
+  // Templates & AI Generate & Import
+  const [templateModal, setTemplateModal] = useState(false);
+  const [generateModal, setGenerateModal] = useState(false);
+  const [generatePrompt, setGeneratePrompt] = useState('');
+  const [generateProvider, setGenerateProvider] = useState<Provider>('gemini');
+  const [generateModel, setGenerateModel] = useState('gemini-2.5-flash');
+  const [generating, setGenerating] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   const onConnect: OnConnect = useCallback(
-    (params) => setEdges((eds) => addEdge(params, eds)),
-    [setEdges],
+    (params) => {
+      pushUndo();
+      setEdges((eds) => addEdge(params, eds));
+    },
+    [setEdges, pushUndo],
   );
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
@@ -264,6 +397,7 @@ export default function Graph() {
       to: e.target,
       condition: (e.data as Record<string, unknown>)?.condition as string | undefined,
       fan_out: !!(e.data as Record<string, unknown>)?.fan_out,
+      on_error: !!(e.data as Record<string, unknown>)?.on_error,
     }));
 
   const toApiChannels = (): GraphChannelDto[] =>
@@ -286,10 +420,66 @@ export default function Graph() {
     }
   };
 
+  const handleSseEvent = (event: GraphSseEvent) => {
+    setRunSteps((prev) => [...prev, event]);
+
+    if (event.type === 'node_start' && event.node_id) {
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === event.node_id
+            ? { ...n, data: { ...n.data, active: true } }
+            : n,
+        ),
+      );
+    }
+    if (event.type === 'node_end' && event.node_id) {
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === event.node_id
+            ? { ...n, data: { ...n.data, active: false } }
+            : n,
+        ),
+      );
+      // Capture state for inspector
+      if (event.state) {
+        setStateHistory((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(event.node_id!) || [];
+          next.set(event.node_id!, [...existing, {
+            step: event.step_number ?? existing.length,
+            state: event.state as Record<string, unknown>,
+          }]);
+          return next;
+        });
+      }
+    }
+    if (event.type === 'complete' || event.type === 'graph_complete') {
+      setRunOutput(JSON.stringify(event.output, null, 2));
+      setHitlSessionId(null);
+      setHitlInterruptValue('');
+    }
+    if (event.type === 'interrupted') {
+      setHitlSessionId(event.session_id || null);
+      setHitlInterruptValue(
+        typeof event.interrupt_value === 'string'
+          ? event.interrupt_value
+          : JSON.stringify(event.interrupt_value, null, 2),
+      );
+      setHitlResumeInput('');
+      setRunning(false);
+    }
+    if (event.type === 'error') {
+      showToast('error', event.message || 'Execution error');
+    }
+  };
+
   const handleRun = async () => {
     setRunning(true);
     setRunOutput(null);
     setRunSteps([]);
+    setStateHistory(new Map());
+    setHitlSessionId(null);
+    setHitlInterruptValue('');
 
     let inputJson: unknown;
     try {
@@ -301,54 +491,66 @@ export default function Graph() {
     }
 
     try {
-      await graphInvokeStream(
-        toApiNodes(),
-        toApiEdges(),
-        toApiChannels(),
-        inputJson,
-        (event: GraphSseEvent) => {
-          setRunSteps((prev) => [...prev, event]);
-
-          if (event.type === 'node_start' && event.node_id) {
-            setNodes((nds) =>
-              nds.map((n) =>
-                n.id === event.node_id
-                  ? { ...n, data: { ...n.data, active: true } }
-                  : n,
-              ),
-            );
-          }
-          if (event.type === 'node_end' && event.node_id) {
-            setNodes((nds) =>
-              nds.map((n) =>
-                n.id === event.node_id
-                  ? { ...n, data: { ...n.data, active: false } }
-                  : n,
-              ),
-            );
-          }
-          if (event.type === 'complete' || event.type === 'graph_complete') {
-            setRunOutput(JSON.stringify(event.output, null, 2));
-          }
-          if (event.type === 'error') {
-            showToast('error', event.message || 'Execution error');
-          }
-        },
-      );
+      if (hitlMode) {
+        const threadId = `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await graphExecuteResumable(
+          threadId,
+          toApiNodes(),
+          toApiEdges(),
+          toApiChannels(),
+          inputJson,
+          handleSseEvent,
+        );
+      } else {
+        await graphInvokeStream(
+          toApiNodes(),
+          toApiEdges(),
+          toApiChannels(),
+          inputJson,
+          handleSseEvent,
+          undefined,
+          recursionLimit,
+        );
+      }
     } catch (err) {
       showToast('error', err instanceof Error ? err.message : 'Execution failed');
     } finally {
-      setRunning(false);
+      if (!hitlSessionId) setRunning(false);
       // Clear active highlights
+      setNodes((nds) => nds.map((n) => ({ ...n, data: { ...n.data, active: false } })));
+    }
+  };
+
+  const handleResume = async () => {
+    if (!hitlSessionId) return;
+    setRunning(true);
+
+    let resumeValue: unknown;
+    try {
+      resumeValue = JSON.parse(hitlResumeInput);
+    } catch {
+      // If not valid JSON, treat as plain string
+      resumeValue = hitlResumeInput;
+    }
+
+    try {
+      await graphResume(hitlSessionId, resumeValue, handleSseEvent);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Resume failed');
+    } finally {
+      if (!hitlSessionId) setRunning(false);
       setNodes((nds) => nds.map((n) => ({ ...n, data: { ...n.data, active: false } })));
     }
   };
 
   const handleAddNode = () => {
     if (!newNodeLabel.trim()) return;
+    pushUndo();
     const id = `${newNodeType}_${nodeCounter.current++}`;
     const defaultConfig =
       newNodeType === 'llm' ? { ...DEFAULT_LLM_CONFIG } :
+      newNodeType === 'agent' ? { ...DEFAULT_AGENT_CONFIG } :
+      newNodeType === 'interrupt' ? { value: 'Please review and approve' } :
       newNodeType === 'deep_research' ? { ...DEFAULT_DEEP_RESEARCH_CONFIG } :
       newNodeType === 'transform' ? { ...DEFAULT_TRANSFORM_CONFIG } :
       undefined;
@@ -378,6 +580,7 @@ export default function Graph() {
       to: e.target,
       condition: (e.data as Record<string, unknown>)?.condition as string | undefined,
       fan_out: !!(e.data as Record<string, unknown>)?.fan_out,
+      on_error: !!(e.data as Record<string, unknown>)?.on_error,
     })),
     channels: channels.map((c) => ({
       key: c.key,
@@ -388,6 +591,7 @@ export default function Graph() {
   });
 
   const loadGraphData = (data: GraphData) => {
+    const posMap = new Map(data.nodes.map((n) => [n.id, n.position]));
     const newNodes: Node[] = data.nodes.map((n) => ({
       id: n.id,
       type: n.type,
@@ -397,18 +601,32 @@ export default function Graph() {
         ...(n.config ? { config: n.config } : {}),
       },
     }));
-    const newEdges: Edge[] = data.edges.map((e, i) => ({
-      id: `e-${e.from}-${e.to}-${i}`,
-      source: e.from,
-      target: e.to,
-      ...(e.fan_out ? {
-        style: { strokeWidth: 2, strokeDasharray: '6 3', stroke: '#f97316' },
-        label: 'parallel',
-        labelStyle: { fill: '#f97316', fontSize: 10, fontWeight: 600 },
-      } : {}),
-      ...(e.condition && !e.fan_out ? { label: e.condition } : {}),
-      data: { fan_out: !!e.fan_out, condition: e.condition || undefined },
-    }));
+    const newEdges: Edge[] = data.edges.map((e, i) => {
+      const srcPos = posMap.get(e.from);
+      const tgtPos = posMap.get(e.to);
+      const isBackEdge = srcPos && tgtPos && tgtPos.y < srcPos.y;
+      return {
+        id: `e-${e.from}-${e.to}-${i}`,
+        source: e.from,
+        target: e.to,
+        ...(e.on_error ? {
+          style: { strokeWidth: 2, strokeDasharray: '5 3', stroke: '#ef4444' },
+          label: 'on error',
+          labelStyle: { fill: '#ef4444', fontSize: 10, fontWeight: 600 },
+        } : e.fan_out ? {
+          style: { strokeWidth: 2, strokeDasharray: '6 3', stroke: '#f97316' },
+          label: 'parallel',
+          labelStyle: { fill: '#f97316', fontSize: 10, fontWeight: 600 },
+        } : isBackEdge ? {
+          style: { strokeWidth: 2, strokeDasharray: '4 4', stroke: '#8b5cf6' },
+          animated: true,
+          label: 'loop',
+          labelStyle: { fill: '#8b5cf6', fontSize: 10, fontWeight: 600 },
+        } : {}),
+        ...(e.condition && !e.fan_out && !e.on_error && !isBackEdge ? { label: e.condition } : {}),
+        data: { fan_out: !!e.fan_out, on_error: !!e.on_error, condition: e.condition || undefined },
+      };
+    });
     const newChannels: ChannelEntry[] = data.channels.map((c) => ({
       key: c.key,
       type: c.type,
@@ -481,6 +699,188 @@ export default function Graph() {
   const openSaveModal = () => {
     setSaveName(currentGraphName || '');
     setSaveModal(true);
+  };
+
+  // --- Template ---
+  const handleApplyTemplate = (template: GraphTemplate) => {
+    pushUndo();
+    loadGraphData(template.data);
+    setCurrentGraphId(null);
+    setCurrentGraphName(null);
+    setTemplateModal(false);
+    showToast('success', `Applied template: ${template.name}`);
+  };
+
+  // --- AI Generate ---
+  const handleGenerate = async () => {
+    if (!generatePrompt.trim()) return;
+    setGenerating(true);
+    try {
+      const result = await graphGenerate(generatePrompt, generateProvider, generateModel);
+      pushUndo();
+      // Build GraphData with auto-layout positions
+      const graphData: GraphData = {
+        nodes: [
+          { id: 'start', type: 'start', position: { x: 250, y: 0 } },
+          ...result.nodes.map((n, i) => ({
+            ...n,
+            position: { x: 200, y: 120 + i * 140 },
+          })),
+          { id: 'end', type: 'end', position: { x: 250, y: 120 + result.nodes.length * 140 } },
+        ],
+        edges: result.edges,
+        channels: result.channels,
+        node_counter: result.nodes.length + 1,
+      };
+      loadGraphData(graphData);
+      setCurrentGraphId(null);
+      setCurrentGraphName(null);
+      setGenerateModal(false);
+      showToast('success', 'Graph generated from AI');
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Generation failed');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // --- Auto-layout (dagre) ---
+  const handleAutoLayout = () => {
+    pushUndo();
+    const g = new dagre.graphlib.Graph();
+    g.setDefaultEdgeLabel(() => ({}));
+    g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100 });
+
+    for (const node of nodes) {
+      // Use measured dimensions from ReactFlow, fall back to estimates
+      const w = node.measured?.width ?? 150;
+      const h = node.measured?.height ?? 50;
+      g.setNode(node.id, { width: w, height: h });
+    }
+    for (const edge of edges) {
+      g.setEdge(edge.source, edge.target);
+    }
+
+    dagre.layout(g);
+
+    setNodes((nds) =>
+      nds.map((node) => {
+        const dagreNode = g.node(node.id);
+        if (!dagreNode) return node;
+        const w = node.measured?.width ?? 150;
+        const h = node.measured?.height ?? 50;
+        // dagre returns center coordinates; convert to top-left for ReactFlow
+        return { ...node, position: { x: dagreNode.x - w / 2, y: dagreNode.y - h / 2 } };
+      }),
+    );
+    showToast('success', 'Auto-layout applied');
+  };
+
+  // --- Export/Import ---
+  const handleExport = () => {
+    const data = toGraphData();
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${currentGraphName || 'graph'}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string) as GraphData;
+        if (!data.nodes || !data.edges) {
+          showToast('error', 'Invalid graph JSON: missing nodes or edges');
+          return;
+        }
+        pushUndo();
+        loadGraphData(data);
+        setCurrentGraphId(null);
+        setCurrentGraphName(file.name.replace(/\.json$/, ''));
+        showToast('success', `Imported: ${file.name}`);
+      } catch {
+        showToast('error', 'Invalid JSON file');
+      }
+    };
+    reader.readAsText(file);
+    // Reset input so the same file can be re-imported
+    e.target.value = '';
+  };
+
+  // --- File attachment helpers ---
+  type Attachment = { data: string; media_type: string; name: string };
+
+  const handleFileAttach = (nodeId: string, files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const currentAttachments: Attachment[] = (getNodeConfig(nodes.find((n) => n.id === nodeId)!).attachments as Attachment[]) || [];
+    const promises = Array.from(files).map(
+      (file) =>
+        new Promise<Attachment>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            resolve({ data: base64, media_type: file.type || 'application/octet-stream', name: file.name });
+          };
+          reader.readAsDataURL(file);
+        }),
+    );
+    Promise.all(promises).then((newAttachments) => {
+      updateNodeConfig(nodeId, 'attachments', [...currentAttachments, ...newAttachments]);
+    });
+  };
+
+  const removeAttachment = (nodeId: string, index: number) => {
+    const currentAttachments: Attachment[] = (getNodeConfig(nodes.find((n) => n.id === nodeId)!).attachments as Attachment[]) || [];
+    updateNodeConfig(nodeId, 'attachments', currentAttachments.filter((_, i) => i !== index));
+  };
+
+  const renderAttachments = (nodeId: string, config: NodeConfig) => {
+    const attachments = (config.attachments as Attachment[]) || [];
+    return (
+      <div>
+        <label className="block text-xs text-muted-foreground mb-1">Attachments</label>
+        {attachments.length > 0 && (
+          <div className="space-y-1 mb-2">
+            {attachments.map((a, i) => (
+              <div key={i} className="flex items-center gap-1.5 text-xs bg-surface rounded px-2 py-1">
+                <span className="truncate flex-1" title={a.name}>
+                  {a.media_type.startsWith('image/') ? '🖼' : '📎'} {a.name}
+                </span>
+                <span className="text-muted-foreground shrink-0">
+                  {Math.round(a.data.length * 0.75 / 1024)}KB
+                </span>
+                <button
+                  onClick={() => removeAttachment(nodeId, i)}
+                  className="text-muted-foreground hover:text-red-500 shrink-0"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <label className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-dashed border-border rounded cursor-pointer hover:bg-surface">
+          <span>+ Add files</span>
+          <input
+            type="file"
+            multiple
+            accept="image/*,.pdf,.txt,.csv,.json,.md"
+            onChange={(e) => { handleFileAttach(nodeId, e.target.files); e.target.value = ''; }}
+            className="hidden"
+          />
+        </label>
+        <p className="text-[10px] text-muted-foreground mt-0.5">
+          Images, PDF, text files. Sent as base64 to the model.
+        </p>
+      </div>
+    );
   };
 
   // Render config editor fields for the selected node
@@ -626,6 +1026,182 @@ export default function Graph() {
               </div>
             );
           })()}
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">Tools</label>
+            <div className="space-y-1">
+              {AVAILABLE_TOOLS.map((tool) => {
+                const enabled = ((config.tools as string[]) || []).includes(tool);
+                return (
+                  <label key={tool} className="flex items-center gap-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(e) => {
+                        const current = ((config.tools as string[]) || []).slice();
+                        if (e.target.checked) {
+                          current.push(tool);
+                        } else {
+                          const idx = current.indexOf(tool);
+                          if (idx >= 0) current.splice(idx, 1);
+                        }
+                        updateNodeConfig(id, 'tools', current);
+                      }}
+                      className="accent-blue-500"
+                    />
+                    <span>{tool}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          {((config.tools as string[]) || []).length > 0 && (
+            <div>
+              <label className="block text-xs text-muted-foreground mb-0.5">Max Tool Iterations</label>
+              <input
+                type="number"
+                min={1} max={20} step={1}
+                value={(config.max_tool_iterations as number) ?? 5}
+                onChange={(e) => updateNodeConfig(id, 'max_tool_iterations', parseInt(e.target.value) || 5)}
+                className="w-full px-2 py-1.5 border border-border rounded text-xs"
+              />
+            </div>
+          )}
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Max Retries</label>
+            <input
+              type="number"
+              min={0} max={5} step={1}
+              value={(config.max_retries as number) ?? 0}
+              onChange={(e) => updateNodeConfig(id, 'max_retries', parseInt(e.target.value) || 0)}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs"
+            />
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              Retry on failure with exponential backoff (0 = no retry)
+            </p>
+          </div>
+          {renderAttachments(id, config)}
+        </div>
+      );
+    }
+
+    if (selectedNode.type === 'agent') {
+      return (
+        <div className="space-y-3 mt-3">
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Agent Config</h4>
+          <div className="px-2 py-1.5 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-700">
+            ReAct agent with tool calling loop. Automatically calls tools until done.
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Provider</label>
+            <select
+              value={(config.provider as string) || 'gemini'}
+              onChange={(e) => {
+                const newProvider = e.target.value;
+                updateNodeConfig(id, 'provider', newProvider);
+                const models = MODEL_OPTIONS[newProvider];
+                if (models?.[0]) updateNodeConfig(id, 'model', models[0].id);
+              }}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+            >
+              <option value="gemini">Gemini</option>
+              <option value="claude">Claude</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Model</label>
+            <select
+              value={(config.model as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'model', e.target.value)}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+            >
+              {(MODEL_OPTIONS[(config.provider as string) || 'gemini'] || []).map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">System Prompt</label>
+            <textarea
+              value={(config.system_prompt as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'system_prompt', e.target.value)}
+              rows={3}
+              placeholder="You are a helpful assistant with access to tools..."
+              className="w-full px-2 py-1.5 border border-border rounded text-xs resize-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">Tools</label>
+            <div className="space-y-1">
+              {AVAILABLE_TOOLS.map((tool) => {
+                const enabled = ((config.tools as string[]) || []).includes(tool);
+                return (
+                  <label key={tool} className="flex items-center gap-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(e) => {
+                        const current = ((config.tools as string[]) || []).slice();
+                        if (e.target.checked) {
+                          current.push(tool);
+                        } else {
+                          const idx = current.indexOf(tool);
+                          if (idx >= 0) current.splice(idx, 1);
+                        }
+                        updateNodeConfig(id, 'tools', current);
+                      }}
+                      className="accent-emerald-500"
+                    />
+                    <span>{tool}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Recursion Limit</label>
+            <input
+              type="number"
+              min={1} max={100} step={1}
+              value={(config.recursion_limit as number) ?? 25}
+              onChange={(e) => updateNodeConfig(id, 'recursion_limit', parseInt(e.target.value) || 25)}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Max Retries</label>
+            <input
+              type="number"
+              min={0} max={5} step={1}
+              value={(config.max_retries as number) ?? 0}
+              onChange={(e) => updateNodeConfig(id, 'max_retries', parseInt(e.target.value) || 0)}
+              className="w-full px-2 py-1.5 border border-border rounded text-xs"
+            />
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              Retry on failure with exponential backoff (0 = no retry)
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs text-muted-foreground mb-0.5">Input Ch.</label>
+              <input
+                type="text"
+                value={(config.input_channel as string) || 'value'}
+                onChange={(e) => updateNodeConfig(id, 'input_channel', e.target.value)}
+                className="w-full px-2 py-1.5 border border-border rounded text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-0.5">Output Ch.</label>
+              <input
+                type="text"
+                value={(config.output_channel as string) || 'value'}
+                onChange={(e) => updateNodeConfig(id, 'output_channel', e.target.value)}
+                className="w-full px-2 py-1.5 border border-border rounded text-xs"
+              />
+            </div>
+          </div>
+          {renderAttachments(id, config)}
         </div>
       );
     }
@@ -714,6 +1290,30 @@ export default function Graph() {
       );
     }
 
+    if (selectedNode.type === 'interrupt') {
+      return (
+        <div className="space-y-3 mt-3">
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Interrupt Config</h4>
+          <div className="px-2 py-1.5 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
+            Pauses execution and waits for human input. Requires HITL mode.
+          </div>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-0.5">Interrupt Message</label>
+            <textarea
+              value={(config.value as string) || ''}
+              onChange={(e) => updateNodeConfig(id, 'value', e.target.value)}
+              rows={3}
+              placeholder="Please review and approve this result..."
+              className="w-full px-2 py-1.5 border border-border rounded text-xs resize-none"
+            />
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              Shown to the user when execution pauses at this node.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
     if (selectedNode.type === 'transform') {
       return (
         <div className="space-y-3 mt-3">
@@ -756,6 +1356,12 @@ export default function Graph() {
           onConnect={onConnect}
           onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }}
           onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
+          onEdgeContextMenu={(e, edge) => {
+            e.preventDefault();
+            pushUndo();
+            setEdges((eds) => eds.filter((ed) => ed.id !== edge.id));
+            if (selectedEdgeId === edge.id) setSelectedEdgeId(null);
+          }}
           onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
           nodeTypes={nodeTypes}
           fitView
@@ -801,31 +1407,129 @@ export default function Graph() {
                 Edges with fan-out from the same source node run their targets in parallel.
               </p>
             </div>
-            {!(selectedEdge.data as Record<string, unknown>)?.fan_out && (
-              <div>
-                <label className="block text-xs text-muted-foreground mb-0.5">Condition (state key)</label>
+            <div>
+              <label className="flex items-center gap-2 text-xs text-card-foreground cursor-pointer">
                 <input
-                  type="text"
-                  value={((selectedEdge.data as Record<string, unknown>)?.condition as string) || ''}
+                  type="checkbox"
+                  checked={!!(selectedEdge.data as Record<string, unknown>)?.on_error}
                   onChange={(e) => {
-                    const val = e.target.value;
+                    const checked = e.target.checked;
                     setEdges((eds) =>
                       eds.map((ed) => {
                         if (ed.id !== selectedEdge.id) return ed;
                         return {
                           ...ed,
-                          data: { ...(ed.data as Record<string, unknown>), condition: val || undefined },
-                          label: val || undefined,
+                          data: { ...(ed.data as Record<string, unknown>), on_error: checked },
+                          style: checked
+                            ? { strokeWidth: 2, strokeDasharray: '5 3', stroke: '#ef4444' }
+                            : { strokeWidth: 2 },
+                          label: checked ? 'on error' : ((ed.data as Record<string, unknown>)?.condition as string || undefined),
+                          labelStyle: checked ? { fill: '#ef4444', fontSize: 10, fontWeight: 600 } : undefined,
                         };
                       }),
                     );
                   }}
-                  placeholder="e.g. flag"
-                  className="w-full px-2 py-1.5 border border-border rounded text-xs"
+                  className="accent-red-500"
                 />
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Route to this target when state[key] is truthy.
-                </p>
+                <span className="font-medium">Error edge</span>
+              </label>
+              <p className="text-[10px] text-muted-foreground mt-1 ml-5">
+                Only follow this edge when the source node fails.
+              </p>
+            </div>
+            {!(selectedEdge.data as Record<string, unknown>)?.fan_out && !(selectedEdge.data as Record<string, unknown>)?.on_error && (
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setEdges((eds) =>
+                        eds.map((ed) =>
+                          ed.id === selectedEdge.id
+                            ? { ...ed, data: { ...(ed.data as Record<string, unknown>), condition_mode: 'simple' } }
+                            : ed,
+                        ),
+                      );
+                    }}
+                    className={`px-2 py-1 text-xs rounded ${
+                      ((selectedEdge.data as Record<string, unknown>)?.condition_mode || 'simple') === 'simple'
+                        ? 'bg-blue-100 text-blue-700 font-medium'
+                        : 'text-muted-foreground hover:bg-surface'
+                    }`}
+                  >
+                    Simple
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEdges((eds) =>
+                        eds.map((ed) =>
+                          ed.id === selectedEdge.id
+                            ? { ...ed, data: { ...(ed.data as Record<string, unknown>), condition_mode: 'expression' } }
+                            : ed,
+                        ),
+                      );
+                    }}
+                    className={`px-2 py-1 text-xs rounded ${
+                      (selectedEdge.data as Record<string, unknown>)?.condition_mode === 'expression'
+                        ? 'bg-purple-100 text-purple-700 font-medium'
+                        : 'text-muted-foreground hover:bg-surface'
+                    }`}
+                  >
+                    Expression
+                  </button>
+                </div>
+                {((selectedEdge.data as Record<string, unknown>)?.condition_mode || 'simple') === 'simple' ? (
+                  <div>
+                    <label className="block text-xs text-muted-foreground mb-0.5">Condition (state key)</label>
+                    <input
+                      type="text"
+                      value={((selectedEdge.data as Record<string, unknown>)?.condition as string) || ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEdges((eds) =>
+                          eds.map((ed) => {
+                            if (ed.id !== selectedEdge.id) return ed;
+                            return {
+                              ...ed,
+                              data: { ...(ed.data as Record<string, unknown>), condition: val || undefined },
+                              label: val || undefined,
+                            };
+                          }),
+                        );
+                      }}
+                      placeholder="e.g. flag"
+                      className="w-full px-2 py-1.5 border border-border rounded text-xs"
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      Route to this target when state[key] is truthy.
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs text-muted-foreground mb-0.5">Rhai Expression</label>
+                    <textarea
+                      value={((selectedEdge.data as Record<string, unknown>)?.condition as string) || ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEdges((eds) =>
+                          eds.map((ed) => {
+                            if (ed.id !== selectedEdge.id) return ed;
+                            return {
+                              ...ed,
+                              data: { ...(ed.data as Record<string, unknown>), condition: val || undefined },
+                              label: val ? `[${val.slice(0, 20)}${val.length > 20 ? '...' : ''}]` : undefined,
+                            };
+                          }),
+                        );
+                      }}
+                      rows={2}
+                      placeholder='state.score > 50 && state.category == "A"'
+                      className="w-full px-2 py-1.5 border border-border rounded text-xs font-mono resize-none"
+                    />
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      Rhai expression. Access state via <code className="bg-surface px-0.5 rounded">state.key</code>. Must return true/false.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
             <button
@@ -841,29 +1545,65 @@ export default function Graph() {
         ) : selectedNode && selectedNode.type !== 'start' && selectedNode.type !== 'end' ? (
           <div className="space-y-4">
             <h3 className="text-sm font-semibold text-foreground">Node: {selectedNode.id}</h3>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground uppercase mb-1">Type</label>
-              <p className="text-sm text-card-foreground capitalize">{selectedNode.type}</p>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground uppercase mb-1">Label</label>
-              <input
-                type="text"
-                value={(selectedNode.data as Record<string, string>).label || ''}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setNodes((nds) =>
-                    nds.map((n) =>
-                      n.id === selectedNode.id
-                        ? { ...n, data: { ...n.data, label: val } }
-                        : n,
-                    ),
-                  );
-                }}
-                className="w-full px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-            </div>
-            {renderNodeConfigEditor()}
+            {stateHistory.size > 0 && (
+              <div className="flex gap-1 border-b border-border pb-1">
+                <button
+                  onClick={() => setInspectorTab('config')}
+                  className={`px-2 py-1 text-xs rounded-t ${inspectorTab === 'config' ? 'bg-blue-100 text-blue-700 font-medium' : 'text-muted-foreground'}`}
+                >
+                  Config
+                </button>
+                <button
+                  onClick={() => setInspectorTab('state')}
+                  className={`px-2 py-1 text-xs rounded-t ${inspectorTab === 'state' ? 'bg-green-100 text-green-700 font-medium' : 'text-muted-foreground'}`}
+                >
+                  State {stateHistory.has(selectedNode.id) ? `(${stateHistory.get(selectedNode.id)!.length})` : ''}
+                </button>
+              </div>
+            )}
+            {(inspectorTab === 'config' || stateHistory.size === 0) ? (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground uppercase mb-1">Type</label>
+                  <p className="text-sm text-card-foreground capitalize">{selectedNode.type}</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground uppercase mb-1">Label</label>
+                  <input
+                    type="text"
+                    value={(selectedNode.data as Record<string, string>).label || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNodes((nds) =>
+                        nds.map((n) =>
+                          n.id === selectedNode.id
+                            ? { ...n, data: { ...n.data, label: val } }
+                            : n,
+                        ),
+                      );
+                    }}
+                    className="w-full px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </div>
+                {renderNodeConfigEditor()}
+              </>
+            ) : (
+              <div className="space-y-2">
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">State after execution</h4>
+                {stateHistory.has(selectedNode.id) ? (
+                  stateHistory.get(selectedNode.id)!.map((entry, i) => (
+                    <div key={i} className="space-y-1">
+                      <div className="text-xs text-muted-foreground font-medium">Step #{entry.step}</div>
+                      <pre className="text-xs font-mono bg-surface rounded p-2 overflow-x-auto max-h-[300px] overflow-y-auto text-foreground">
+                        {JSON.stringify(entry.state, null, 2)}
+                      </pre>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">No state captured for this node</p>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div>
@@ -934,6 +1674,22 @@ export default function Graph() {
       {/* Toolbar */}
       <div className="absolute bottom-4 left-4 flex gap-2">
         <button
+          onClick={handleUndo}
+          disabled={undoStack.current.length === 0}
+          className="px-3 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface disabled:opacity-30"
+          title="Undo (Ctrl+Z)"
+        >
+          ↩
+        </button>
+        <button
+          onClick={handleRedo}
+          disabled={redoStack.current.length === 0}
+          className="px-3 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface disabled:opacity-30"
+          title="Redo (Ctrl+Shift+Z)"
+        >
+          ↪
+        </button>
+        <button
           onClick={() => setAddNodeModal(true)}
           className="px-4 py-2 bg-primary text-primary-foreground text-sm rounded-lg hover:opacity-90"
         >
@@ -963,6 +1719,44 @@ export default function Graph() {
         >
           Load
         </button>
+        <span className="w-px h-6 bg-border self-center" />
+        <button
+          onClick={() => setTemplateModal(true)}
+          className="px-4 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface"
+        >
+          Templates
+        </button>
+        <button
+          onClick={() => setGenerateModal(true)}
+          className="px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700"
+        >
+          AI Generate
+        </button>
+        <button
+          onClick={handleAutoLayout}
+          className="px-4 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface"
+        >
+          Layout
+        </button>
+        <button
+          onClick={handleExport}
+          className="px-4 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface"
+        >
+          Export
+        </button>
+        <button
+          onClick={() => importInputRef.current?.click()}
+          className="px-4 py-2 bg-card border border-border text-sm rounded-lg hover:bg-surface"
+        >
+          Import
+        </button>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".json"
+          onChange={handleImport}
+          className="hidden"
+        />
       </div>
 
       {/* Toast */}
@@ -988,6 +1782,8 @@ export default function Graph() {
                   className="w-full px-3 py-2 border border-border rounded-md text-sm bg-card"
                 >
                   <option value="llm">💬 LLM Call</option>
+                  <option value="agent">&#x1F916; Agent (ReAct)</option>
+                  <option value="interrupt">&#x23F8; Interrupt (HITL)</option>
                   <option value="deep_research">🔬 Deep Research</option>
                   <option value="conditional">◇ Conditional</option>
                   <option value="transform">⚙ Transform</option>
@@ -1027,21 +1823,81 @@ export default function Graph() {
                   className="w-full px-3 py-2 border border-border rounded-md text-sm font-mono resize-none"
                 />
               </div>
+              <div>
+                <label className="block text-sm font-medium text-card-foreground mb-1">Recursion Limit</label>
+                <input
+                  type="number"
+                  min={1} max={200} step={1}
+                  value={recursionLimit}
+                  onChange={(e) => setRecursionLimit(parseInt(e.target.value) || 25)}
+                  className="w-full px-3 py-2 border border-border rounded-md text-sm"
+                />
+                <p className="text-xs text-muted-foreground mt-0.5">Maximum execution steps (prevents infinite loops)</p>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-card-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hitlMode}
+                  onChange={(e) => setHitlMode(e.target.checked)}
+                  className="accent-amber-500"
+                />
+                <span className="font-medium">HITL Mode</span>
+                <span className="text-xs text-muted-foreground">(Human-in-the-Loop)</span>
+              </label>
+              {hitlMode && (
+                <p className="text-xs text-amber-600 -mt-2 ml-6">
+                  Execution will pause at Interrupt nodes and wait for your input before continuing.
+                </p>
+              )}
               <button
                 onClick={handleRun}
-                disabled={running}
+                disabled={running || !!hitlSessionId}
                 className="w-full px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
-                {running ? 'Running...' : '▶ Execute'}
+                {running ? 'Running...' : hitlMode ? '▶ Execute (HITL)' : '▶ Execute'}
               </button>
+
+              {/* HITL Interrupted - Resume Form */}
+              {hitlSessionId && (
+                <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">&#x23F8;</span>
+                    <h3 className="text-sm font-semibold text-amber-800">Execution Paused</h3>
+                  </div>
+                  <div className="text-xs text-amber-700 bg-amber-100 rounded p-2">
+                    <span className="font-medium">Interrupt message:</span>
+                    <pre className="mt-1 whitespace-pre-wrap">{hitlInterruptValue}</pre>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-amber-800 mb-1">Your Response</label>
+                    <textarea
+                      value={hitlResumeInput}
+                      onChange={(e) => setHitlResumeInput(e.target.value)}
+                      rows={3}
+                      placeholder="Type your response or paste JSON..."
+                      className="w-full px-2 py-1.5 border border-amber-300 rounded text-sm resize-none"
+                    />
+                  </div>
+                  <button
+                    onClick={handleResume}
+                    disabled={running || !hitlResumeInput.trim()}
+                    className="w-full px-4 py-2 bg-amber-600 text-white text-sm rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    {running ? 'Resuming...' : '▶ Resume Execution'}
+                  </button>
+                </div>
+              )}
 
               {runSteps.length > 0 && (
                 <div>
                   <h3 className="text-sm font-medium text-card-foreground mb-2">Steps</h3>
                   <div className="space-y-1">
                     {runSteps.map((step, i) => (
-                      <div key={i} className="text-xs font-mono bg-surface rounded px-2 py-1 text-card-foreground">
+                      <div key={i} className={`text-xs font-mono rounded px-2 py-1 ${
+                        step.type === 'interrupted' ? 'bg-amber-100 text-amber-800' : 'bg-surface text-card-foreground'
+                      }`}>
                         {step.type}: {step.node_id || ''} {step.step_number !== undefined ? `(#${step.step_number})` : ''}
+                        {step.type === 'interrupted' ? ' [PAUSED]' : ''}
                       </div>
                     ))}
                   </div>
@@ -1157,6 +2013,109 @@ export default function Graph() {
             <div className="flex justify-end mt-4">
               <button onClick={() => setLoadModal(false)} className="px-4 py-2 text-sm text-card-foreground">
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Template Modal */}
+      {templateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTemplateModal(false)}>
+          <div className="bg-card rounded-lg shadow-xl w-full max-w-lg p-6 max-h-[70vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-foreground mb-4">Graph Templates</h2>
+            <p className="text-xs text-muted-foreground mb-4">Select a template to load a pre-built graph pattern.</p>
+            <div className="grid grid-cols-1 gap-3">
+              {GRAPH_TEMPLATES.map((t) => (
+                <div
+                  key={t.id}
+                  className="p-4 border border-border rounded-lg hover:bg-surface cursor-pointer transition-colors"
+                  onClick={() => handleApplyTemplate(t)}
+                >
+                  <h3 className="text-sm font-semibold text-foreground">{t.name}</h3>
+                  <p className="text-xs text-muted-foreground mt-1">{t.description}</p>
+                  <div className="flex gap-2 mt-2">
+                    <span className="text-[10px] px-1.5 py-0.5 bg-surface rounded text-muted-foreground">
+                      {t.data.nodes.filter((n) => n.type !== 'start' && n.type !== 'end').length} nodes
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 bg-surface rounded text-muted-foreground">
+                      {t.data.edges.length} edges
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 bg-surface rounded text-muted-foreground">
+                      {t.data.channels.length} channels
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end mt-4">
+              <button onClick={() => setTemplateModal(false)} className="px-4 py-2 text-sm text-card-foreground">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Generate Modal */}
+      {generateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => !generating && setGenerateModal(false)}>
+          <div className="bg-card rounded-lg shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-foreground mb-4">AI Generate Graph</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-card-foreground mb-1">Describe the graph you want</label>
+                <textarea
+                  value={generatePrompt}
+                  onChange={(e) => setGeneratePrompt(e.target.value)}
+                  rows={4}
+                  placeholder="e.g. A graph that summarizes text, translates it to Japanese, then validates the translation quality..."
+                  className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none"
+                  autoFocus
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-0.5">Provider</label>
+                  <select
+                    value={generateProvider}
+                    onChange={(e) => {
+                      const p = e.target.value as Provider;
+                      setGenerateProvider(p);
+                      const models = MODEL_OPTIONS[p];
+                      if (models?.[0]) setGenerateModel(models[0].id);
+                    }}
+                    className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+                  >
+                    <option value="gemini">Gemini</option>
+                    <option value="claude">Claude</option>
+                    <option value="openai">OpenAI</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-muted-foreground mb-0.5">Model</label>
+                  <select
+                    value={generateModel}
+                    onChange={(e) => setGenerateModel(e.target.value)}
+                    className="w-full px-2 py-1.5 border border-border rounded text-xs bg-card"
+                  >
+                    {(MODEL_OPTIONS[generateProvider] || []).map((m) => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <button
+                onClick={handleGenerate}
+                disabled={generating || !generatePrompt.trim()}
+                className="w-full px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50"
+              >
+                {generating ? 'Generating...' : 'Generate Graph'}
+              </button>
+            </div>
+            <div className="flex justify-end mt-4">
+              <button onClick={() => setGenerateModal(false)} disabled={generating} className="px-4 py-2 text-sm text-card-foreground">
+                Cancel
               </button>
             </div>
           </div>

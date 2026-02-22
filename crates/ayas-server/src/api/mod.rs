@@ -37,6 +37,7 @@ pub fn api_routes(state: AppState) -> Router {
         .merge(projects::routes())
         .merge(datasets::routes())
         .merge(graphs::routes())
+        .merge(hitl::routes())
         .with_state(state);
 
     // Stateless routes (already Router<()>)
@@ -44,7 +45,6 @@ pub fn api_routes(state: AppState) -> Router {
         .merge(agent::routes())
         .merge(graph::routes())
         .merge(research::routes())
-        .merge(hitl::routes())
         .merge(pipeline::routes());
 
     Router::new()

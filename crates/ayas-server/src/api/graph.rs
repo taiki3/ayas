@@ -17,8 +17,8 @@ use ayas_llm::factory::create_chat_model;
 use crate::error::AppError;
 use crate::extractors::ApiKeys;
 use crate::graph_convert::{
-    GraphBuildContext, GraphModelFactory, GraphResearchFactory, convert_to_state_graph_with_context,
-    validate_graph,
+    GraphBuildContext, GraphModelFactory, GraphResearchFactory, GraphToolsFactory,
+    convert_to_state_graph_with_context, validate_graph,
 };
 use crate::graph_gen;
 use crate::sse::{sse_done, sse_event};
@@ -37,6 +37,18 @@ pub fn default_graph_factory() -> GraphModelFactory {
 /// Create the default research factory that creates GeminiInteractionsClient instances.
 pub fn default_research_factory() -> GraphResearchFactory {
     Arc::new(|api_key| Arc::new(GeminiInteractionsClient::new(api_key)))
+}
+
+/// Create the default tools factory for graph nodes.
+pub fn default_tools_factory() -> GraphToolsFactory {
+    use crate::tools::BuiltinTools;
+    Arc::new(|names: &[String]| {
+        BuiltinTools::all()
+            .into_iter()
+            .filter(|t| names.contains(&t.definition().name))
+            .map(|t| Arc::from(t) as Arc<dyn ayas_core::tool::Tool>)
+            .collect()
+    })
 }
 
 pub fn routes() -> Router {
@@ -82,6 +94,14 @@ async fn graph_validate(Json(req): Json<GraphValidateRequest>) -> Json<GraphVali
     })
 }
 
+fn build_runnable_config(recursion_limit: Option<usize>) -> RunnableConfig {
+    let mut config = RunnableConfig::default();
+    if let Some(limit) = recursion_limit {
+        config.recursion_limit = limit;
+    }
+    config
+}
+
 async fn graph_execute(
     State(factory): State<GraphModelFactory>,
     api_keys: ApiKeys,
@@ -106,11 +126,12 @@ async fn graph_execute(
         factory,
         api_keys,
         research_factory: Some(default_research_factory()),
+        tools_factory: Some(default_tools_factory()),
     };
     let compiled = convert_to_state_graph_with_context(
         &req.nodes, &req.edges, &req.channels, Some(context),
     )?;
-    let config = RunnableConfig::default();
+    let config = build_runnable_config(req.recursion_limit);
 
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -190,11 +211,12 @@ async fn graph_invoke_stream(
         factory,
         api_keys,
         research_factory: Some(default_research_factory()),
+        tools_factory: Some(default_tools_factory()),
     };
     let compiled = convert_to_state_graph_with_context(
         &req.nodes, &req.edges, &req.channels, Some(context),
     )?;
-    let config = RunnableConfig::default();
+    let config = build_runnable_config(req.recursion_limit);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
 
@@ -257,11 +279,12 @@ async fn graph_stream(
         factory,
         api_keys,
         research_factory: Some(default_research_factory()),
+        tools_factory: Some(default_tools_factory()),
     };
     let compiled = convert_to_state_graph_with_context(
         &req.nodes, &req.edges, &req.channels, Some(context),
     )?;
-    let config = RunnableConfig::default();
+    let config = build_runnable_config(req.recursion_limit);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<CoreEvent>(64);
 
@@ -323,12 +346,14 @@ async fn graph_generate(
                     to: "transform_1".into(),
                     condition: None,
                     fan_out: false,
+                    on_error: false,
                 },
                 GraphEdgeDto {
                     from: "transform_1".into(),
                     to: "end".into(),
                     condition: None,
                     fan_out: false,
+                    on_error: false,
                 },
             ];
             let channels = vec![GraphChannelDto {

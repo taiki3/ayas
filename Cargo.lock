@@ -692,6 +692,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "ayas-agent",
  "ayas-checkpoint",
  "ayas-core",
  "ayas-deep-research",

@@ -15,7 +15,9 @@ use ayas_core::config::RunnableConfig;
 use ayas_graph::compiled::StepInfo;
 
 use crate::error::AppError;
-use crate::graph_convert::convert_to_state_graph;
+use crate::extractors::ApiKeys;
+use crate::graph_convert::{GraphBuildContext, convert_to_state_graph_with_context};
+use crate::api::graph::{default_graph_factory, default_research_factory, default_tools_factory};
 use crate::session::InterruptSession;
 use crate::sse::{sse_done, sse_event};
 use crate::state::AppState;
@@ -48,23 +50,30 @@ enum HitlSseEvent {
     },
 }
 
-pub fn routes() -> Router {
-    let state = AppState::with_smith_dir(
-        ayas_smith::client::SmithConfig::default().base_dir,
-    );
-    let router: Router<AppState> = Router::new()
+pub fn routes() -> Router<AppState> {
+    Router::new()
         .route("/graph/execute-resumable", post(execute_resumable))
         .route("/graph/resume", post(resume))
         .route("/graph/sessions", get(list_sessions))
-        .route("/graph/sessions/{id}", delete(cancel_session));
-    router.with_state(state)
+        .route("/graph/sessions/{id}", delete(cancel_session))
+}
+
+fn build_context(api_keys: ApiKeys) -> GraphBuildContext {
+    GraphBuildContext {
+        factory: default_graph_factory(),
+        api_keys,
+        research_factory: Some(default_research_factory()),
+        tools_factory: Some(default_tools_factory()),
+    }
 }
 
 async fn execute_resumable(
     State(state): State<AppState>,
+    api_keys: ApiKeys,
     Json(req): Json<ExecuteResumableRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
-    let compiled = convert_to_state_graph(&req.nodes, &req.edges, &req.channels)?;
+    let context = build_context(api_keys);
+    let compiled = convert_to_state_graph_with_context(&req.nodes, &req.edges, &req.channels, Some(context))?;
 
     let config = RunnableConfig::default().with_thread_id(&req.thread_id);
 
@@ -146,6 +155,7 @@ async fn execute_resumable(
 
 async fn resume(
     State(state): State<AppState>,
+    api_keys: ApiKeys,
     Json(req): Json<ResumeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let session = state
@@ -169,7 +179,8 @@ async fn resume(
     )
     .map_err(|e| AppError::Internal(format!("Failed to deserialize graph channels: {e}")))?;
 
-    let compiled = convert_to_state_graph(&nodes, &edges, &channels)?;
+    let context = build_context(api_keys);
+    let compiled = convert_to_state_graph_with_context(&nodes, &edges, &channels, Some(context))?;
 
     let config = RunnableConfig::default()
         .with_thread_id(&session.thread_id)
@@ -278,7 +289,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
-        Router::new().nest("/api", routes())
+        let state = AppState::with_smith_dir(
+            ayas_smith::client::SmithConfig::default().base_dir,
+        );
+        Router::new().nest("/api", routes().with_state(state))
     }
 
     fn parse_sse_events(body: &[u8]) -> Vec<Value> {

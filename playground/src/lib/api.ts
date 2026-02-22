@@ -60,6 +60,8 @@ export interface GraphEdgeDto {
   condition?: string;
   /** When true, edges sharing the same source node are executed in parallel (fan-out). */
   fan_out?: boolean;
+  /** When true, this edge is only followed when the source node execution fails. */
+  on_error?: boolean;
 }
 
 export interface GraphChannelDto {
@@ -74,13 +76,17 @@ export interface GraphValidateResponse {
 }
 
 export interface GraphSseEvent {
-  type: 'node_start' | 'node_end' | 'complete' | 'graph_complete' | 'error';
+  type: 'node_start' | 'node_end' | 'complete' | 'graph_complete' | 'interrupted' | 'error';
   node_id?: string;
   step_number?: number;
   state?: Record<string, unknown>;
   output?: unknown;
   total_steps?: number;
   message?: string;
+  // HITL fields
+  session_id?: string;
+  checkpoint_id?: string;
+  interrupt_value?: unknown;
 }
 
 // --- Saved Graphs ---
@@ -159,41 +165,9 @@ export function getCachedEnvKeys(): EnvKeys | null {
 
 // --- Helpers ---
 
-const API_KEY_HEADERS: Record<Provider, string> = {
-  gemini: 'X-Gemini-Key',
-  claude: 'X-Anthropic-Key',
-  openai: 'X-OpenAI-Key',
-};
-
-function getApiKeys(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem('ayas-api-keys') || '{}');
-  } catch {
-    return {};
-  }
-}
-
-export function getApiKey(provider: Provider): string | undefined {
-  const keys = getApiKeys();
-  return keys[provider];
-}
-
-/** Returns true if the provider key is available (either from env or localStorage). */
-export function hasApiKey(provider: Provider): boolean {
-  if (envKeysCache?.[provider]) return true;
-  return !!getApiKey(provider);
-}
-
-function buildHeaders(provider: Provider): Record<string, string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  // If env var provides the key on the server side, no header needed
-  if (envKeysCache?.[provider]) return headers;
-  const apiKey = getApiKey(provider);
-  if (!apiKey) {
-    throw new Error(`API key for ${provider} is not set. Please configure it in API Keys settings.`);
-  }
-  headers[API_KEY_HEADERS[provider]] = apiKey;
-  return headers;
+function buildHeaders(_provider: Provider): Record<string, string> {
+  // API keys are provided via backend environment variables
+  return { 'Content-Type': 'application/json' };
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -313,17 +287,14 @@ export function graphInvokeStream(
   input: unknown,
   onEvent: (event: GraphSseEvent) => void,
   signal?: AbortSignal,
+  recursionLimit?: number,
 ): Promise<void> {
-  // Build headers with all available API keys for LLM nodes
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  for (const provider of ['gemini', 'claude', 'openai'] as Provider[]) {
-    if (envKeysCache?.[provider]) continue;
-    const key = getApiKey(provider);
-    if (key) headers[API_KEY_HEADERS[provider]] = key;
-  }
+  const body: Record<string, unknown> = { nodes, edges, channels, input };
+  if (recursionLimit !== undefined) body.recursion_limit = recursionLimit;
   return streamSSE(
     '/api/graph/invoke-stream',
-    { nodes, edges, channels, input },
+    body,
     headers,
     onEvent,
     signal,
@@ -342,6 +313,43 @@ export async function graphGenerate(
     body: JSON.stringify({ prompt, provider, model }),
   });
   return handleResponse(res);
+}
+
+// --- HITL API ---
+
+export function graphExecuteResumable(
+  threadId: string,
+  nodes: GraphNodeDto[],
+  edges: GraphEdgeDto[],
+  channels: GraphChannelDto[],
+  input: unknown,
+  onEvent: (event: GraphSseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  return streamSSE(
+    '/api/graph/execute-resumable',
+    { thread_id: threadId, nodes, edges, channels, input },
+    headers,
+    onEvent,
+    signal,
+  );
+}
+
+export function graphResume(
+  sessionId: string,
+  resumeValue: unknown,
+  onEvent: (event: GraphSseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  return streamSSE(
+    '/api/graph/resume',
+    { session_id: sessionId, resume_value: resumeValue },
+    headers,
+    onEvent,
+    signal,
+  );
 }
 
 // --- Saved Graphs API ---
@@ -563,13 +571,7 @@ export function pipelineInvokeStream(
   onEvent: (event: PipelineSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  if (!hasApiKey('gemini')) {
-    throw new Error('Gemini API key is required for Pipeline. Please configure it in API Keys settings.');
-  }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (!envKeysCache?.gemini) {
-    headers['X-Gemini-Key'] = getApiKey('gemini')!;
-  }
   return streamSSE('/api/pipeline/hypothesis', params, headers, onEvent, signal);
 }
 
@@ -582,13 +584,7 @@ export function researchInvokeStream(
   onEvent: (event: ResearchSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  if (!hasApiKey('gemini')) {
-    throw new Error('Gemini API key is required for Research. Please configure it in API Keys settings.');
-  }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (!envKeysCache?.gemini) {
-    headers['X-Gemini-Key'] = getApiKey('gemini')!;
-  }
   return streamSSE(
     '/api/research/invoke',
     {

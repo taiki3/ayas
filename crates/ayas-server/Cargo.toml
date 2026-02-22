@@ -10,6 +10,7 @@ description = "Web server for the Ayas Playground"
 ayas-core = { workspace = true }
 ayas-llm = { workspace = true }
 ayas-graph = { workspace = true }
+ayas-agent = { workspace = true }
 ayas-checkpoint = { workspace = true }
 ayas-deep-research = { workspace = true }
 axum = { workspace = true }

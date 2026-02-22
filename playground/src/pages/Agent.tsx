@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   agentInvokeStream,
-  getApiKey,
   type Provider,
   type ChatMessage,
   type AgentSseEvent,
@@ -73,11 +72,6 @@ export default function Agent() {
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
-
-    if (!getApiKey(provider)) {
-      setError(`API key for ${provider} is not set. Click "API Keys" in the header to configure.`);
-      return;
-    }
 
     setError(null);
     setInput('');

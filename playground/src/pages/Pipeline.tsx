@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import Markdown from 'react-markdown';
-import { pipelineInvokeStream, getApiKey, type PipelineSseEvent, type PipelineInvokeParams } from '../lib/api';
+import { pipelineInvokeStream, type PipelineSseEvent, type PipelineInvokeParams } from '../lib/api';
 
 interface HypothesisCardFull {
   index: number;
@@ -79,11 +79,6 @@ export default function Pipeline() {
 
   const handleStart = async () => {
     if (loading) return;
-
-    if (!getApiKey('gemini')) {
-      setError('Gemini API key is required. Click "API Keys" in the header to configure.');
-      return;
-    }
 
     if (mode === 'manual') {
       const validTitles = manualHypotheses.filter(t => t.trim());

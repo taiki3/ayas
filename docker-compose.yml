@@ -9,6 +9,7 @@ services:
         NO_PROXY: ${NO_PROXY:-}
     environment:
       - PORT=3001
+      - AYAS_TRACING_ENABLED=true
       - AYAS_SMITH_DIR=/data/smith
       - AYAS_SMITH_BACKEND=${AYAS_SMITH_BACKEND:-duckdb}
       - CLICKHOUSE_URL=${CLICKHOUSE_URL:-}

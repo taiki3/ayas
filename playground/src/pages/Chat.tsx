@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { chatInvoke, getApiKey, type Provider, type ChatMessage } from '../lib/api';
+import { chatInvoke, type Provider, type ChatMessage } from '../lib/api';
 
 const PROVIDER_MODELS: Record<Provider, string[]> = {
   gemini: ['gemini-2.0-flash', 'gemini-2.5-pro'],
@@ -39,11 +39,6 @@ export default function Chat() {
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
-
-    if (!getApiKey(provider)) {
-      setError(`API key for ${provider} is not set. Click "API Keys" in the header to configure.`);
-      return;
-    }
 
     setError(null);
     setInput('');

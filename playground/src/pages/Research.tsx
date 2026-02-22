@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import Markdown from 'react-markdown';
-import { researchInvokeStream, getApiKey, type ResearchSseEvent } from '../lib/api';
+import { researchInvokeStream, type ResearchSseEvent } from '../lib/api';
 
 const AGENTS = [
   { value: '', label: 'Default' },
@@ -22,11 +22,6 @@ export default function Research() {
 
   const handleStart = async (queryText: string, prevId?: string) => {
     if (!queryText.trim() || loading) return;
-
-    if (!getApiKey('gemini')) {
-      setError('Gemini API key is required for Research. Click "API Keys" in the header to configure.');
-      return;
-    }
 
     setError(null);
     setLoading(true);
